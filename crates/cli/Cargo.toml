@@ -1,0 +1,38 @@
+[package]
+name = "fluent-compiler-cli"
+description = "Command-line interface for compiling Rust smart contracts to WASM/rWASM for the Fluent blockchain"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fluentlabs-xyz/fluent-compiler-suite"
+keywords = ["fluent", "wasm", "rwasm", "compiler", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "fluent-compiler"
+path = "src/main.rs"
+
+[dependencies]
+# Core compiler library
+fluent-compiler = { path = "../core" }
+
+# CLI framework
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+eyre.workspace = true
+
+# Encoding
+hex.workspace = true
+base64.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile.workspace = true
