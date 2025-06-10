@@ -7,10 +7,10 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-fluentbase-sdk = { path = "/Users/danilnaumov/dev/src/github.com/fluentlabs-xyz/fluentbase/crates/sdk", default-features = false }
+fluentbase-sdk = { git = "https://github.com/fluentlabs-xyz/fluentbase", tag = "v0.1.0-dev", default-features=false }
 
 [dev-dependencies]
-fluentbase-sdk-testing = { path = "/Users/danilnaumov/dev/src/github.com/fluentlabs-xyz/fluentbase/crates/sdk-testing" }
+fluentbase-sdk-testing = { git = "https://github.com/fluentlabs-xyz/fluentbase", tag = "v0.1.0-dev", default-features=false }
 
 [features]
 default = ["std"]

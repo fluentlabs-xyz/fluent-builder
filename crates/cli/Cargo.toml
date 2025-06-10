@@ -13,11 +13,14 @@ name = "fluent-compiler"
 path = "src/main.rs"
 
 [dependencies]
-# Core compiler library
-fluent-compiler = { path = "../core" }
+# Core compiler library with ethers feature
+fluent-compiler = { path = "../core", features = ["ethers"] }
 
 # CLI framework
 clap = { version = "4", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # Serialization
 serde.workspace = true
