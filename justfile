@@ -16,9 +16,9 @@ deploy-and-verify contract="power-calculator" network="dev": link
     #!/usr/bin/env bash
     set -euo pipefail
     
-    # Compile
-    echo "📦 Compiling..."
-    ./fluent-compiler compile examples/{{contract}}
+    # Compile with archive
+    echo "📦 Compiling with source archive..."
+    ./fluent-compiler compile examples/{{contract}} --archive
     
     # Deploy
     echo "🚀 Deploying..."
@@ -53,6 +53,16 @@ local:
 compile contract="power-calculator": link
     ./fluent-compiler compile examples/{{contract}}
 
+# Compile with source archive
+compile-archive contract="power-calculator": link
+    ./fluent-compiler compile examples/{{contract}} --archive
+
+# Compile for verification (with archive and specific output)
+compile-verify contract="power-calculator": link
+    ./fluent-compiler compile examples/{{contract}} \
+        --archive \
+        --output-dir examples/{{contract}}/verification-bundle
+
 deploy contract="power-calculator" network="dev":
     gblend deploy \
         --private-key $DEPLOY_PRIVATE_KEY \
@@ -74,3 +84,6 @@ test:
 clean:
     cargo clean
     rm -f fluent-compiler
+    # Clean all generated artifacts
+    find examples -type d -name "out" -exec rm -rf {} + 2>/dev/null || true
+    find examples -type d -name "verification-bundle" -exec rm -rf {} + 2>/dev/null || true
