@@ -34,30 +34,6 @@ struct Cli {
     quiet: bool,
 }
 
-/// Common compilation settings
-#[derive(Parser, Debug, Clone)]
-struct CompileSettings {
-    /// Build profile
-    #[arg(long, default_value = "release")]
-    profile: String,
-
-    /// Space-separated list of features
-    #[arg(long, value_delimiter = ' ')]
-    features: Vec<String>,
-
-    /// Do not activate default features
-    #[arg(long, default_value_t = true)]
-    no_default_features: bool,
-
-    /// Use Git source for verification (requires clean public repository)
-    #[arg(long)]
-    git_source: bool,
-
-    /// Allow compilation with uncommitted changes (only for archive source)
-    #[arg(long)]
-    allow_dirty: bool,
-}
-
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Compile a Rust contract to WASM/rWASM
@@ -70,16 +46,25 @@ enum Commands {
         #[arg(short, long, default_value = "out")]
         output_dir: PathBuf,
 
-        /// Create source archive
+        /// Build profile
+        #[arg(long, default_value = "release")]
+        profile: String,
+
+        /// Space-separated list of features
+        #[arg(long, value_delimiter = ' ')]
+        features: Vec<String>,
+
+        /// Do not activate default features
+        #[arg(long, default_value_t = true)]
+        no_default_features: bool,
+
+        /// Allow compilation with uncommitted changes (uses archive source instead of git)
         #[arg(long)]
-        archive: bool,
+        allow_dirty: bool,
 
         /// Output JSON to stdout
         #[arg(long)]
         json: bool,
-
-        #[command(flatten)]
-        compile: CompileSettings,
     },
 
     /// Verify a deployed contract
@@ -100,12 +85,21 @@ enum Commands {
         #[arg(long)]
         rpc: String,
 
+        /// Build profile
+        #[arg(long, default_value = "release")]
+        profile: String,
+
+        /// Space-separated list of features
+        #[arg(long, value_delimiter = ' ')]
+        features: Vec<String>,
+
+        /// Do not activate default features
+        #[arg(long, default_value_t = true)]
+        no_default_features: bool,
+
         /// Output JSON
         #[arg(long)]
         json: bool,
-
-        #[command(flatten)]
-        compile: CompileSettings,
     },
 }
 
@@ -149,8 +143,6 @@ enum SuccessData {
         abi: Option<serde_json::Value>,
         compiler_version: String,
         sdk_version: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        git_info: Option<GitInfoJson>,
     },
 }
 
@@ -195,17 +187,29 @@ fn main() {
         Commands::Compile {
             project_root,
             output_dir,
-            archive,
+            profile,
+            features,
+            no_default_features,
+            allow_dirty,
             json,
-            compile,
-        } => run_compile(project_root, output_dir, compile, archive, json),
+        } => run_compile(
+            project_root,
+            output_dir,
+            profile,
+            features,
+            no_default_features,
+            allow_dirty,
+            json,
+        ),
         Commands::Verify {
             project_root,
             address,
             chain_id,
             rpc,
+            profile,
+            features,
+            no_default_features,
             json,
-            compile,
         } => {
             let runtime = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
             runtime.block_on(run_verify(
@@ -213,7 +217,9 @@ fn main() {
                 address,
                 chain_id,
                 rpc,
-                compile,
+                profile,
+                features,
+                no_default_features,
                 json,
             ))
         }
@@ -228,61 +234,45 @@ fn main() {
 fn run_compile(
     project_root: PathBuf,
     output_dir: PathBuf,
-    settings: CompileSettings,
-    archive: bool,
+    profile: String,
+    features: Vec<String>,
+    no_default_features: bool,
+    allow_dirty: bool,
     json: bool,
 ) -> Result<()> {
-    // Check Git status if using git source
+    // Check Git status
     let git_info = fluent_compiler::detect_git_info(&project_root)?;
     
-    // Validate git source requirements
-    if settings.git_source {
-        match &git_info {
-            None => {
-                return Err(eyre::eyre!(
-                    "Cannot use --git-source: project is not in a Git repository.\n\
-                     Initialize a Git repository or remove the --git-source flag."
-                ));
-            }
-            Some(git) if git.is_dirty => {
-                return Err(eyre::eyre!(
-                    "Cannot use --git-source: repository has {} uncommitted changes.\n\
-                     \n\
-                     To fix this:\n\
-                     1. Commit your changes: git add . && git commit -m \"Your message\"\n\
-                     2. Or stash them: git stash\n\
-                     3. Or remove --git-source flag to use archive source",
-                    git.dirty_files_count
-                ));
-            }
-            Some(git) => {
-                // Additional check for public repository (optional)
-                if !is_likely_public_repository(&git.remote_url) {
-                    tracing::warn!(
-                        "Repository '{}' may be private. Git source verification requires public access.",
-                        git.remote_url
-                    );
-                }
-            }
+    // Determine source type based on git status and allow_dirty flag
+    let use_git_source = match (&git_info, allow_dirty) {
+        (None, false) => {
+            return Err(eyre::eyre!(
+                "Project is not in a Git repository.\n\
+                 Initialize a Git repository or use --allow-dirty flag to compile with archive source."
+            ));
         }
-    } else if let Some(git) = &git_info {
-        // Archive mode - just warn if dirty
-        if git.is_dirty && !settings.allow_dirty {
-            tracing::warn!(
-                "Repository has {} uncommitted changes. \
-                 Consider committing for better reproducibility.",
+        (Some(git), false) if git.is_dirty => {
+            return Err(eyre::eyre!(
+                "Repository has {} uncommitted changes.\n\
+                 \n\
+                 To fix this:\n\
+                 1. Commit your changes: git add . && git commit -m \"Your message\"\n\
+                 2. Or stash them: git stash\n\
+                 3. Or use --allow-dirty flag to compile with archive source",
                 git.dirty_files_count
-            );
+            ));
         }
-    }
+        (_, true) => false, // --allow-dirty always uses archive source
+        _ => true, // Clean git repo, use git source
+    };
 
     // Build configuration
     let mut config = CompileConfig::new(project_root);
     config.output_dir = output_dir;
-    config.profile = settings.profile;
-    config.features = settings.features;
-    config.no_default_features = settings.no_default_features;
-    config.use_git_source = settings.git_source;
+    config.profile = profile;
+    config.features = features;
+    config.no_default_features = no_default_features;
+    config.use_git_source = use_git_source;
 
     let result = compile(&config).context("Compilation failed")?;
 
@@ -302,7 +292,7 @@ fn run_compile(
                     .unwrap_or(false),
                 output_dir: None,
                 git_info: git_info.as_ref().map(GitInfoJson::from),
-                source_type: if settings.git_source { "git" } else { "archive" }.to_string(),
+                source_type: if use_git_source { "git" } else { "archive" }.to_string(),
             },
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -310,8 +300,8 @@ fn run_compile(
         // Print Git info if available
         if let Some(git) = &git_info {
             println!("📦 Git repository: {} @ {}", git.branch, git.commit_hash_short);
-            if git.is_dirty {
-                println!("⚠️  Warning: Repository has uncommitted changes");
+            if git.is_dirty && allow_dirty {
+                println!("⚠️  Warning: Compiling with uncommitted changes (archive source)");
             }
         }
 
@@ -337,7 +327,7 @@ fn run_compile(
                         println!("   Commit: {}", &commit[..8]);
                     }
                     fluent_compiler::Source::Archive { .. } => {
-                        println!("📦 Source: Archive (will be created)");
+                        println!("📦 Source: Archive");
                     }
                 }
             }
@@ -358,8 +348,8 @@ fn run_compile(
                 println!("   - metadata.json");
             }
 
-            // Create archive if requested or if using archive source
-            if archive || !settings.git_source {
+            // Create archive if using archive source
+            if !use_git_source {
                 let archive_path = saved.output_dir.join("sources.tar.gz");
                 let archive_options = ArchiveOptions {
                     format: ArchiveFormat::TarGz,
@@ -394,39 +384,21 @@ async fn run_verify(
     address: String,
     chain_id: u64,
     rpc: String,
-    settings: CompileSettings,
+    profile: String,
+    features: Vec<String>,
+    no_default_features: bool,
     json: bool,
 ) -> Result<()> {
-    // Get Git info for display
-    let git_info = fluent_compiler::detect_git_info(&project_root)?;
-    
-    // Apply same validation as compile
-    if settings.git_source {
-        match &git_info {
-            None => {
-                return Err(eyre::eyre!(
-                    "Cannot use --git-source: project is not in a Git repository"
-                ));
-            }
-            Some(git) if git.is_dirty => {
-                return Err(eyre::eyre!(
-                    "Cannot use --git-source: repository has {} uncommitted changes",
-                    git.dirty_files_count
-                ));
-            }
-            _ => {}
-        }
-    }
-
     // Fetch deployed bytecode hash
     let deployed_hash = fetch_bytecode_hash(&address, &rpc, chain_id).await?;
 
     // Build compilation config
+    // Verify always uses the provided directory as-is (no git source)
     let mut compile_config = CompileConfig::new(project_root.clone());
-    compile_config.profile = settings.profile;
-    compile_config.features = settings.features;
-    compile_config.no_default_features = settings.no_default_features;
-    compile_config.use_git_source = settings.git_source;
+    compile_config.profile = profile;
+    compile_config.features = features;
+    compile_config.no_default_features = no_default_features;
+    compile_config.use_git_source = false; // Always use archive/plain directory for verify
 
     // Run verification
     let verify_config = fluent_compiler::VerifyConfig {
@@ -472,7 +444,6 @@ async fn run_verify(
                     .as_ref()
                     .map(|r| format!("{}-{}", r.runtime_info.sdk.tag, r.runtime_info.sdk.commit))
                     .unwrap_or_default(),
-                git_info: git_info.as_ref().map(GitInfoJson::from),
             },
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -481,10 +452,6 @@ async fn run_verify(
             println!("✅ Contract verified successfully!");
             println!("📝 Contract name: {}", verification_result.contract_name);
             println!("🔍 Bytecode hash matches: {}", deployed_hash);
-            
-            if let Some(git) = &git_info {
-                println!("📦 Git: {} @ {}", git.branch, git.commit_hash_short);
-            }
             
             println!("\n📋 Contract details:");
             println!("   Address: {}", address);
@@ -521,13 +488,6 @@ async fn run_verify(
     }
 
     Ok(())
-}
-
-/// Check if repository URL is likely public
-fn is_likely_public_repository(url: &str) -> bool {
-    ["github.com", "gitlab.com", "bitbucket.org"]
-        .iter()
-        .any(|host| url.contains(host))
 }
 
 /// Fetch bytecode hash from deployed contract
@@ -567,16 +527,14 @@ async fn fetch_bytecode_hash(address: &str, rpc_url: &str, chain_id: u64) -> Res
 }
 
 fn output_error(error: eyre::Report) {
-    let error_type = if error.to_string().contains("Git repository has") {
+    let error_type = if error.to_string().contains("uncommitted changes") {
         "git_dirty_state"
-    } else if error.to_string().contains("Cannot use --git-source") {
-        "git_source_error"
+    } else if error.to_string().contains("not in a Git repository") {
+        "no_git_repository"
     } else if error.to_string().contains("Compilation failed") {
         "compilation_failed"
     } else if error.to_string().contains("Failed to fetch") {
         "network_error"
-    } else if error.to_string().contains("fluentbase-sdk") {
-        "invalid_source"
     } else {
         "unknown_error"
     };
@@ -621,28 +579,26 @@ mod tests {
             "--features",
             "test feature2",
             "--no-default-features",
-            "--git-source",
         ]);
 
-        if let Commands::Compile { compile, .. } = cli.command {
-            assert_eq!(compile.profile, "debug");
-            assert_eq!(compile.features, vec!["test", "feature2"]);
-            assert!(compile.no_default_features);
-            assert!(compile.git_source);
+        if let Commands::Compile {
+            profile,
+            features,
+            no_default_features,
+            ..
+        } = cli.command {
+            assert_eq!(profile, "debug");
+            assert_eq!(features, vec!["test", "feature2"]);
+            assert!(no_default_features);
         }
     }
 
     #[test]
     fn test_allow_dirty_flag() {
-        let cli = Cli::parse_from(&[
-            "fluent-compiler",
-            "compile",
-            "--allow-dirty",
-        ]);
+        let cli = Cli::parse_from(&["fluent-compiler", "compile", "--allow-dirty"]);
 
-        if let Commands::Compile { compile, .. } = cli.command {
-            assert!(compile.allow_dirty);
-            assert!(!compile.git_source);
+        if let Commands::Compile { allow_dirty, .. } = cli.command {
+            assert!(allow_dirty);
         }
     }
 }

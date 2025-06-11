@@ -56,9 +56,9 @@ impl Default for CompileConfig {
             profile: "release".to_string(),
             features: vec![],
             no_default_features: true,
-            locked: false,
+            locked: true,
             artifacts: ArtifactsConfig::default(),
-            use_git_source: false,
+            use_git_source: true,
         }
     }
 }
