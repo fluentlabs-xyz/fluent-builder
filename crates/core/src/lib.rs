@@ -8,6 +8,7 @@ mod archive;
 mod artifacts;
 mod compiler;
 mod config;
+mod git;
 mod parser;
 mod verify;
 
@@ -18,12 +19,13 @@ pub use compiler::{compile, get_rwasm_hash, get_wasm_hash, CompilationResult, Co
 pub use config::{ArtifactsConfig, CompileConfig};
 
 // Artifact management
-pub use artifacts::{save_artifacts, Abi, ContractArtifacts, SavedPaths};
+pub use artifacts::{metadata::Source, save_artifacts, Abi, ContractArtifacts, SavedPaths};
 
 // Verification
 pub use verify::{verify, VerificationResult, VerificationStatus, VerifyConfig};
 
 pub use archive::{create_verification_archive, ArchiveFormat, ArchiveInfo, ArchiveOptions};
+pub use git::{detect_git_info, get_project_path_in_repo, GitInfo};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

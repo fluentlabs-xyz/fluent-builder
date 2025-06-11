@@ -27,6 +27,9 @@ pub struct CompileConfig {
 
     /// Which artifacts to generate
     pub artifacts: ArtifactsConfig,
+
+    /// Whether to use git source (requires clean public repo)
+    pub use_git_source: bool,
 }
 
 /// Controls which artifacts are generated during compilation
@@ -55,6 +58,7 @@ impl Default for CompileConfig {
             no_default_features: true,
             locked: false,
             artifacts: ArtifactsConfig::default(),
+            use_git_source: false,
         }
     }
 }

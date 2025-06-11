@@ -5,6 +5,8 @@
 
 use crate::compiler::{ContractInfo, RustInfo, SdkInfo};
 use crate::config::CompileConfig;
+use crate::GitInfo;
+use eyre::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -51,6 +53,43 @@ impl Default for Source {
             archive_path: String::new(),
             project_path: String::new(),
         }
+    }
+}
+
+impl Source {
+    /// Create archive source
+    pub fn archive(project_path: impl Into<String>) -> Self {
+        Source::Archive {
+            archive_path: "./source.tar.gz".to_string(),
+            project_path: project_path.into(),
+        }
+    }
+
+    /// Create git source from git info
+    /// Returns error if git info is not suitable for git source
+    pub fn git(git_info: &GitInfo, project_path: impl Into<String>) -> Result<Self> {
+        if git_info.is_dirty {
+            return Err(eyre::eyre!(
+                "Cannot use git source: repository has {} uncommitted changes",
+                git_info.dirty_files_count
+            ));
+        }
+
+        Ok(Source::Git {
+            repository: git_info.remote_url.clone(),
+            commit: git_info.commit_hash.clone(),
+            project_path: project_path.into(),
+        })
+    }
+
+    /// Check if this is an archive source
+    pub fn is_archive(&self) -> bool {
+        matches!(self, Source::Archive { .. })
+    }
+
+    /// Check if this is a git source
+    pub fn is_git(&self) -> bool {
+        matches!(self, Source::Git { .. })
     }
 }
 

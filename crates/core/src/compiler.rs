@@ -67,7 +67,6 @@ pub struct CompilationOutputs {
     pub wasm: Vec<u8>,
     pub rwasm: Vec<u8>,
 }
-
 /// Compile a Rust smart contract to WASM and rWASM
 pub fn compile(config: &CompileConfig) -> Result<CompilationResult> {
     let start = std::time::Instant::now();
@@ -97,6 +96,34 @@ pub fn compile(config: &CompileConfig) -> Result<CompilationResult> {
         contract.version,
         sdk_version_string
     );
+
+    // Detect Git information
+    let git_info = crate::git::detect_git_info(&config.project_root)?;
+
+    // Log Git status if available
+    if let Some(git) = &git_info {
+        tracing::info!(
+            "Git: {} @ {} ({})",
+            git.branch,
+            git.commit_hash_short,
+            if git.is_dirty {
+                format!("{} uncommitted changes", git.dirty_files_count)
+            } else {
+                "clean".to_string()
+            }
+        );
+
+        // Warn if repository is dirty
+        if git.is_dirty {
+            tracing::warn!(
+                "Git repository has {} uncommitted changes. \
+                 Contract verification may fail due to source mismatch.",
+                git.dirty_files_count
+            );
+        }
+    } else {
+        tracing::debug!("No Git repository detected");
+    }
 
     // Compile to WASM
     let wasm_bytecode = compile_to_wasm(config, &name)?;
@@ -138,10 +165,40 @@ pub fn compile(config: &CompileConfig) -> Result<CompilationResult> {
             vec![]
         });
 
-        // Determine source type (for now always archive, could detect git in future)
-        let source = artifacts::metadata::Source::Archive {
-            archive_path: "./source.tar.gz".to_string(),
-            project_path: ".".to_string(),
+        // Determine source type based on Git availability and state
+        let source = if let Some(git) = &git_info {
+            if git.is_dirty {
+                // If repository is dirty, fall back to archive mode
+                tracing::debug!("Using archive source due to uncommitted changes");
+                artifacts::metadata::Source::Archive {
+                    archive_path: "./source.tar.gz".to_string(),
+                    project_path: ".".to_string(),
+                }
+            } else {
+                // Clean Git repository - use Git source
+                let project_path = crate::git::get_project_path_in_repo(&config.project_root)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to get project path in repo: {}", e);
+                        ".".to_string()
+                    });
+
+                tracing::debug!(
+                    "Using Git source: {} @ {}",
+                    git.remote_url,
+                    git.commit_hash_short
+                );
+                artifacts::metadata::Source::Git {
+                    repository: git.remote_url.clone(),
+                    commit: git.commit_hash.clone(),
+                    project_path,
+                }
+            }
+        } else {
+            // No Git repository - use archive
+            artifacts::metadata::Source::Archive {
+                archive_path: "./source.tar.gz".to_string(),
+                project_path: ".".to_string(),
+            }
         };
 
         Some(artifacts::generate(
