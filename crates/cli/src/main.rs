@@ -3,12 +3,17 @@
 //! Compiles and verifies Rust smart contracts for the Fluent blockchain.
 
 use clap::{Parser, Subcommand};
+use ethers::{
+    providers::{Http, Middleware, Provider},
+    types::Address,
+};
 use eyre::{Context, Result};
 use fluent_compiler::{
-    compile, CompileConfig, verify::{VerifyConfigBuilder, verify_contract},
-    blockchain::{NetworkConfig, ethers::fetch_bytecode_hash},
+    compile, create_verification_archive, save_artifacts, verify, ArchiveFormat, ArchiveOptions,
+    CompileConfig, VerificationStatus,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use tracing::Level;
 
@@ -35,11 +40,11 @@ struct CompileSettings {
     /// Build profile
     #[arg(long, default_value = "release")]
     profile: String,
-    
+
     /// Space-separated list of features
     #[arg(long, value_delimiter = ' ')]
     features: Vec<String>,
-    
+
     /// Do not activate default features
     #[arg(long, default_value_t = true)]
     no_default_features: bool,
@@ -52,45 +57,45 @@ enum Commands {
         /// Path to the project root
         #[arg(default_value = ".")]
         project_root: PathBuf,
-        
+
         /// Output directory
         #[arg(short, long, default_value = "out")]
         output_dir: PathBuf,
-        
+
         /// Create source archive
         #[arg(long)]
         archive: bool,
-        
+
         /// Output JSON to stdout
         #[arg(long)]
         json: bool,
-        
+
         #[command(flatten)]
         compile: CompileSettings,
     },
-    
+
     /// Verify a deployed contract
     Verify {
         /// Path to the project root
         #[arg(default_value = ".")]
         project_root: PathBuf,
-        
+
         /// Contract address
         #[arg(long)]
         address: String,
-        
+
         /// Chain ID
         #[arg(long)]
         chain_id: u64,
-        
+
         /// RPC endpoint
         #[arg(long)]
         rpc: String,
-        
+
         /// Output JSON
         #[arg(long)]
         json: bool,
-        
+
         #[command(flatten)]
         compile: CompileSettings,
     },
@@ -104,12 +109,9 @@ enum Output {
         #[serde(flatten)]
         data: SuccessData,
     },
-    
+
     #[serde(rename = "error")]
-    Error {
-        error_type: String,
-        message: String,
-    },
+    Error { error_type: String, message: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -125,7 +127,7 @@ enum SuccessData {
         #[serde(skip_serializing_if = "Option::is_none")]
         output_dir: Option<String>,
     },
-    
+
     #[serde(rename = "verify")]
     Verify {
         verified: bool,
@@ -158,13 +160,30 @@ fn main() {
         .init();
 
     let result = match cli.command {
-        Commands::Compile { project_root, output_dir, archive, json, compile } => {
-            run_compile(project_root, output_dir, compile, archive, json)
-        }
-        Commands::Verify { project_root, address, chain_id, rpc, json, compile } => {
-            let runtime = tokio::runtime::Runtime::new()
-                .expect("Failed to create async runtime");
-            runtime.block_on(run_verify(project_root, address, chain_id, rpc, compile, json))
+        Commands::Compile {
+            project_root,
+            output_dir,
+            archive,
+            json,
+            compile,
+        } => run_compile(project_root, output_dir, compile, archive, json),
+        Commands::Verify {
+            project_root,
+            address,
+            chain_id,
+            rpc,
+            json,
+            compile,
+        } => {
+            let runtime = tokio::runtime::Runtime::new().expect("Failed to create async runtime");
+            runtime.block_on(run_verify(
+                project_root,
+                address,
+                chain_id,
+                rpc,
+                compile,
+                json,
+            ))
         }
     };
 
@@ -181,64 +200,87 @@ fn run_compile(
     archive: bool,
     json: bool,
 ) -> Result<()> {
-    // Use builder pattern for configuration
-    let config = CompileConfig::builder()
-        .project_root(project_root)
-        .output_dir(output_dir)
-        .profile(&settings.profile)
-        .features(settings.features)
-        .no_default_features(settings.no_default_features)
-        .build()
-        .context("Invalid compilation configuration")?;
-    
-    let output = compile(&config)
-        .context("Compilation failed")?;
-    
-    let result = &output.result;
-    
+    // Build configuration
+    let mut config = CompileConfig::new(project_root);
+    config.output_dir = output_dir;
+    config.profile = settings.profile;
+    config.features = settings.features;
+    config.no_default_features = settings.no_default_features;
+
+    let result = compile(&config).context("Compilation failed")?;
+
+    let rwasm_hash = format!("{:x}", Sha256::digest(&result.outputs.rwasm));
+
     if json {
         let output = Output::Success {
             data: SuccessData::Compile {
-                contract_name: result.contract_info.name.clone(),
-                rwasm_hash: result.rwasm_hash(),
+                contract_name: result.contract.name.clone(),
+                rwasm_hash: format!("0x{}", rwasm_hash),
                 wasm_size: result.outputs.wasm.len(),
                 rwasm_size: result.outputs.rwasm.len(),
-                has_abi: !result.artifacts.abi.is_empty(),
+                has_abi: result
+                    .artifacts
+                    .as_ref()
+                    .map(|a| !a.abi.is_empty())
+                    .unwrap_or(false),
                 output_dir: None,
             },
         };
         println!("{}", serde_json::to_string(&output)?);
     } else {
-        let options = fluent_compiler::ArtifactWriterOptions {
-            project_root: Some(config.project_root.clone()),
-            output_dir: config.output_directory(),
-            pretty_json: true,
-            create_archive: archive,
-            archive_format: fluent_compiler::archive::ArchiveFormat::TarGz,
-            archive_respect_gitignore: true,
-        };
+        // Save artifacts if any were generated
+        if let Some(artifacts) = &result.artifacts {
+            let saved = save_artifacts(
+                artifacts,
+                &result.contract.name,
+                &result.outputs.wasm,
+                &result.outputs.rwasm,
+                &config.output_directory(),
+                &config.artifacts,
+            )?;
 
-        let saved = fluent_compiler::save_artifacts(result, &options, &config.artifacts)?;
-        
-        println!("✅ Successfully compiled {}", result.contract_info.name);
-        println!("📁 Output directory: {}", saved.output_dir.display());
-        println!("📄 Created files:");
-        println!("   - lib.wasm ({} bytes)", result.outputs.wasm.len());
-        println!("   - lib.rwasm ({} bytes)", result.outputs.rwasm.len());
-        if saved.abi_path.is_some() {
-            println!("   - abi.json");
-        }
-        if saved.interface_path.is_some() {
-            println!("   - interface.sol");
-        }
-        if saved.metadata_path.is_some() {
-            println!("   - metadata.json");
-        }
-        if saved.archive_path.is_some() {
-            println!("   - sources.tar.gz");
+            println!("✅ Successfully compiled {}", result.contract.name);
+            println!("📁 Output directory: {}", saved.output_dir.display());
+            println!("📄 Created files:");
+            println!("   - lib.wasm ({} bytes)", result.outputs.wasm.len());
+            println!("   - lib.rwasm ({} bytes)", result.outputs.rwasm.len());
+            if saved.abi_path.is_some() {
+                println!("   - abi.json");
+            }
+            if saved.interface_path.is_some() {
+                println!("   - interface.sol");
+            }
+            if saved.metadata_path.is_some() {
+                println!("   - metadata.json");
+            }
+
+            // Create archive if requested
+            if archive {
+                let archive_path = saved.output_dir.join("sources.tar.gz");
+                let archive_options = ArchiveOptions {
+                    format: ArchiveFormat::TarGz,
+                    only_compilation_files: true,
+                    compression_level: 6,
+                    respect_gitignore: true,
+                };
+
+                let _archive_info = create_verification_archive(
+                    &config.project_root,
+                    &archive_path,
+                    &archive_options,
+                )?;
+                println!("   - sources.tar.gz");
+            }
+        } else {
+            println!(
+                "✅ Successfully compiled {} (no artifacts generated)",
+                result.contract.name
+            );
+            println!("   - WASM size: {} bytes", result.outputs.wasm.len());
+            println!("   - rWASM size: {} bytes", result.outputs.rwasm.len());
         }
     }
-    
+
     Ok(())
 }
 
@@ -251,40 +293,58 @@ async fn run_verify(
     json: bool,
 ) -> Result<()> {
     // Fetch deployed bytecode hash
-    let network = NetworkConfig::custom("custom", rpc, chain_id);
-    let deployed_hash = fetch_bytecode_hash(&network, &address).await
-        .context("Failed to fetch deployed bytecode")?;
-    
-    // Build verification config
-    let verify_config = VerifyConfigBuilder::new()
-        .project_root(project_root)
-        .deployed_bytecode_hash(deployed_hash.clone())
-        .with_compile_settings(&settings.profile, settings.features, settings.no_default_features)
-        .with_metadata(address.clone(), chain_id)
-        .build()?;
-    
+    let deployed_hash = fetch_bytecode_hash(&address, &rpc, chain_id).await?;
+
+    // Build compilation config
+    let mut compile_config = CompileConfig::new(project_root.clone());
+    compile_config.profile = settings.profile;
+    compile_config.features = settings.features;
+    compile_config.no_default_features = settings.no_default_features;
+
     // Run verification
-    let verification_result = verify_contract(verify_config)
-        .context("Verification failed")?;
-    
+    let verify_config = fluent_compiler::VerifyConfig {
+        project_root,
+        deployed_bytecode_hash: deployed_hash.clone(),
+        compile_config: Some(compile_config),
+    };
+
+    let verification_result = verify(verify_config).context("Verification failed")?;
+
     if json {
         let output = Output::Success {
             data: SuccessData::Verify {
                 verified: verification_result.status.is_success(),
                 contract_name: verification_result.contract_name.clone(),
-                expected_hash: verification_result.details.expected_hash.clone(),
-                actual_hash: verification_result.details.actual_hash.clone().unwrap_or_default(),
+                expected_hash: match &verification_result.status {
+                    VerificationStatus::Success => deployed_hash.clone(),
+                    VerificationStatus::Mismatch { expected, .. } => expected.clone(),
+                    _ => deployed_hash.clone(),
+                },
+                actual_hash: match &verification_result.status {
+                    VerificationStatus::Success => deployed_hash.clone(),
+                    VerificationStatus::Mismatch { actual, .. } => actual.clone(),
+                    _ => String::new(),
+                },
                 abi: if verification_result.status.is_success() {
-                    verification_result.compilation_result
+                    verification_result
+                        .compilation_result
                         .as_ref()
-                        .filter(|r| !r.artifacts.abi.is_empty())
-                        .map(|r| serde_json::to_value(&r.artifacts.abi).ok())
-                        .flatten()
+                        .and_then(|r| r.artifacts.as_ref())
+                        .filter(|a| !a.abi.is_empty())
+                        .and_then(|a| serde_json::to_value(&a.abi).ok())
                 } else {
                     None
                 },
-                compiler_version: verification_result.details.compiler_version.clone().unwrap_or_default(),
-                sdk_version: verification_result.details.sdk_version.clone().unwrap_or_default(),
+                compiler_version: verification_result
+                    .compilation_result
+                    .as_ref()
+                    .map(|r| r.runtime_info.rust.version.clone())
+                    .unwrap_or_default(),
+                sdk_version: verification_result
+                    .compilation_result
+                    .as_ref()
+                    .map(|r| format!("{}-{}", r.runtime_info.sdk.tag, r.runtime_info.sdk.commit))
+                    .unwrap_or_default(),
             },
         };
         println!("{}", serde_json::to_string(&output)?);
@@ -292,36 +352,78 @@ async fn run_verify(
         if verification_result.status.is_success() {
             println!("✅ Contract verified successfully!");
             println!("📝 Contract name: {}", verification_result.contract_name);
-            println!("🔍 Bytecode hash matches: {}", verification_result.details.expected_hash);
+            println!("🔍 Bytecode hash matches: {}", deployed_hash);
             println!("\n📋 Contract details:");
             println!("   Address: {}", address);
             println!("   Chain ID: {}", chain_id);
-            println!("\n🛠️  Build details:");
-            if let Some(version) = &verification_result.details.compiler_version {
-                println!("   Compiler: {}", version);
-            }
-            if let Some(sdk) = &verification_result.details.sdk_version {
-                println!("   SDK version: {}", sdk);
+
+            if let Some(result) = &verification_result.compilation_result {
+                println!("\n🛠️  Build details:");
+                println!("   Compiler: {}", result.runtime_info.rust.version);
+                println!(
+                    "   SDK version: {}-{}",
+                    result.runtime_info.sdk.tag, result.runtime_info.sdk.commit
+                );
             }
         } else {
             println!("❌ Verification failed!");
             println!("📝 Contract name: {}", verification_result.contract_name);
-            if let Some(error) = &verification_result.details.error_message {
-                println!("⚠️  Error: {}", error);
-            }
-            println!("\n🔍 Hash comparison:");
-            println!("   Expected: {}", verification_result.details.expected_hash);
-            if let Some(actual) = &verification_result.details.actual_hash {
-                println!("   Actual:   {}", actual);
+
+            match &verification_result.status {
+                VerificationStatus::Mismatch { expected, actual } => {
+                    println!("\n🔍 Hash comparison:");
+                    println!("   Expected: {}", expected);
+                    println!("   Actual:   {}", actual);
+                }
+                VerificationStatus::CompilationFailed(error) => {
+                    println!("⚠️  Compilation error: {}", error);
+                }
+                _ => {}
             }
         }
     }
-    
+
     if !verification_result.status.is_success() {
         std::process::exit(1);
     }
-    
+
     Ok(())
+}
+
+/// Fetch bytecode hash from deployed contract
+async fn fetch_bytecode_hash(address: &str, rpc_url: &str, chain_id: u64) -> Result<String> {
+    let provider = Provider::<Http>::try_from(rpc_url).context("Failed to create provider")?;
+
+    // Verify chain ID matches
+    let network_chain_id = provider
+        .get_chainid()
+        .await
+        .context("Failed to get chain ID")?;
+
+    if network_chain_id.as_u64() != chain_id {
+        return Err(eyre::eyre!(
+            "Chain ID mismatch: expected {}, got {}",
+            chain_id,
+            network_chain_id
+        ));
+    }
+
+    // Parse address
+    let contract_address: Address = address.parse().context("Invalid contract address")?;
+
+    // Get bytecode
+    let bytecode = provider
+        .get_code(contract_address, None)
+        .await
+        .context("Failed to fetch contract bytecode")?;
+
+    if bytecode.is_empty() {
+        return Err(eyre::eyre!("No bytecode found at address {}", address));
+    }
+
+    // Calculate hash
+    let hash = format!("0x{:x}", Sha256::digest(&bytecode));
+    Ok(hash)
 }
 
 fn output_error(error: eyre::Report) {
@@ -334,12 +436,12 @@ fn output_error(error: eyre::Report) {
     } else {
         "unknown_error"
     };
-    
+
     let output = Output::Error {
         error_type: error_type.to_string(),
         message: error.to_string(),
     };
-    
+
     eprintln!("{}", serde_json::to_string(&output).unwrap());
 }
 
@@ -353,11 +455,14 @@ mod tests {
         assert!(matches!(cli.command, Commands::Compile { .. }));
 
         let cli = Cli::parse_from(&[
-            "fluent-compiler", 
+            "fluent-compiler",
             "verify",
-            "--address", "0x123",
-            "--chain-id", "20993",
-            "--rpc", "https://rpc.endpoint"
+            "--address",
+            "0x123",
+            "--chain-id",
+            "20993",
+            "--rpc",
+            "https://rpc.endpoint",
         ]);
         assert!(matches!(cli.command, Commands::Verify { .. }));
     }
@@ -367,11 +472,13 @@ mod tests {
         let cli = Cli::parse_from(&[
             "fluent-compiler",
             "compile",
-            "--profile", "debug",
-            "--features", "test feature2",
-            "--no-default-features"
+            "--profile",
+            "debug",
+            "--features",
+            "test feature2",
+            "--no-default-features",
         ]);
-        
+
         if let Commands::Compile { compile, .. } = cli.command {
             assert_eq!(compile.profile, "debug");
             assert_eq!(compile.features, vec!["test", "feature2"]);

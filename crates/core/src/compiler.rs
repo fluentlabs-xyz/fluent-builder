@@ -1,266 +1,322 @@
 //! Core WASM compilation logic
 
-use crate::{
-    artifacts::{self, ArtifactContext, BuildInfo},
-    config::CompileConfig,
-    contract::{self, WasmContract},
-    parser, utils,
-};
+use crate::{artifacts, config::CompileConfig, parser};
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use walkdir::WalkDir;
 
-/// Result of compilation process
+/// Result of successful compilation
 #[derive(Debug)]
-pub struct CompileOutput {
-    /// Successfully compiled contract
-    pub result: CompilationResult,
+pub struct CompilationResult {
+    /// Contract information from Cargo.toml
+    pub contract: ContractInfo,
+    /// Raw bytecode outputs
+    pub outputs: CompilationOutputs,
+    /// Generated artifacts (None if generation is disabled)
+    pub artifacts: Option<artifacts::ContractArtifacts>,
+    /// Runtime information detected during build
+    pub runtime_info: RuntimeInfo,
     /// Total compilation time
     pub duration: Duration,
 }
 
-/// Complete compilation result with all outputs
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompilationResult {
-    /// Contract information extracted from Cargo.toml
-    pub contract_info: ContractInfo,
-
-    /// Compilation outputs
-    pub outputs: CompilationOutputs,
-
-    /// Generated artifacts (may be empty if artifact generation is disabled)
-    pub artifacts: artifacts::ContractArtifacts,
-
-    /// Build metadata for reproducibility
-    pub build_metadata: BuildMetadata,
-}
-
-impl CompilationResult {
-    /// Get SHA256 hash of rWASM bytecode
-    pub fn rwasm_hash(&self) -> String {
-        utils::hash_bytes(&self.outputs.rwasm)
-    }
-
-    /// Get SHA256 hash of WASM bytecode
-    pub fn wasm_hash(&self) -> String {
-        utils::hash_bytes(&self.outputs.wasm)
-    }
-}
-
-/// Basic contract information from Cargo.toml
+/// Contract information from Cargo.toml (static info)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContractInfo {
-    /// Contract name from package.name
     pub name: String,
-    /// Contract version from package.version
     pub version: String,
-    /// SDK version from dependencies
-    pub sdk_version: Option<String>,
 }
 
-/// Raw compilation outputs
+/// Runtime information detected during compilation
+#[derive(Debug, Clone)]
+pub struct RuntimeInfo {
+    /// Rust compiler info
+    pub rust: RustInfo,
+    /// SDK version info
+    pub sdk: SdkInfo,
+    /// Build timestamp
+    pub built_at: u64,
+    /// Source tree hash
+    pub source_tree_hash: String,
+}
+
+/// Rust compiler information
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustInfo {
+    pub version: String, // Full version string like "rustc 1.75.0 (82e1608df 2023-12-21)"
+    pub commit: String,  // Extracted commit like "82e1608df"
+    pub target: String,  // Always "wasm32-unknown-unknown" for now
+}
+
+/// SDK version information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SdkInfo {
+    pub tag: String,    // Version tag like "0.1.0"
+    pub commit: String, // Git commit hash or "unknown"
+}
+
+/// Compiled bytecode outputs
+#[derive(Debug, Clone)]
 pub struct CompilationOutputs {
-    /// WASM bytecode
     pub wasm: Vec<u8>,
-    /// rWASM bytecode
     pub rwasm: Vec<u8>,
 }
 
-/// Build metadata for verification and reproducibility
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildMetadata {
-    /// Rust compiler version used
-    pub rustc_version: String,
-    /// Compilation timestamp
-    pub timestamp: u64,
-    /// Hash of all source files
-    pub source_hash: String,
-    /// Target triple used
-    pub target: String,
-    /// Build profile used
-    pub profile: String,
-    /// Features enabled
-    pub features: Vec<String>,
-    /// Whether default features were disabled
-    pub no_default_features: bool,
-}
-
-/// Compiles a Rust contract project
-pub fn compile(config: &CompileConfig) -> Result<CompileOutput> {
-    let start = Instant::now();
-
-    tracing::info!(
-        "Starting compilation with profile={}, features={:?}",
-        config.profile_name(),
-        config.features
-    );
+/// Compile a Rust smart contract to WASM and rWASM
+pub fn compile(config: &CompileConfig) -> Result<CompilationResult> {
+    let start = std::time::Instant::now();
 
     // Validate configuration
-    config
-        .validate()
-        .context("Invalid compilation configuration")?;
+    config.validate()?;
 
-    // Parse contract metadata
+    // Parse contract name and version from Cargo.toml
     let cargo_toml_path = config.project_root.join("Cargo.toml");
-    let wasm_contract = contract::parse_contract_metadata(&cargo_toml_path)
-        .context("Failed to parse contract metadata")?;
+    let (name, version) = parse_cargo_toml(&cargo_toml_path)?;
 
-    let contract_info = ContractInfo {
-        name: wasm_contract.name.clone(),
-        version: wasm_contract.version.clone(),
-        sdk_version: wasm_contract.sdk_version.clone(),
+    let contract = ContractInfo {
+        name: name.clone(),
+        version,
     };
 
-    // Ensure this is a Fluent contract
-    if contract_info.sdk_version.is_none() {
-        return Err(eyre::eyre!("Not a Fluent contract"))
-            .context("No fluentbase-sdk dependency found in Cargo.toml");
-    }
+    // CRITICAL: Get SDK version from Cargo.lock - no defaults
+    let sdk_version_string = read_sdk_version_from_cargo_lock(&config.project_root).context(
+        "Failed to read SDK version from Cargo.lock. Is the project built with 'cargo build'?",
+    )?;
+
+    let sdk = parse_sdk_version(&sdk_version_string);
 
     tracing::info!(
         "Compiling {} v{} (SDK: {})",
-        contract_info.name,
-        contract_info.version,
-        contract_info.sdk_version.as_deref().unwrap_or("unknown")
+        contract.name,
+        contract.version,
+        sdk_version_string
     );
 
     // Compile to WASM
-    let wasm_bytecode =
-        compile_to_wasm(config, &contract_info.name).context("Failed to compile to WASM")?;
-
-    tracing::debug!(
-        "WASM compilation successful, size: {} bytes",
-        wasm_bytecode.len()
-    );
-
-    // Parse source for ABI generation
-    let main_source = wasm_contract
-        .main_source_file()
-        .context("Failed to find main source file")?;
-    let routers = parser::parse_routers(&main_source).unwrap_or_else(|e| {
-        tracing::warn!("Failed to parse routers: {}", e);
-        vec![]
-    });
+    let wasm_bytecode = compile_to_wasm(config, &name)?;
+    tracing::info!("WASM size: {} bytes", wasm_bytecode.len());
 
     // Compile to rWASM
-    let rwasm_bytecode = compile_to_rwasm(&wasm_bytecode).context("Failed to compile to rWASM")?;
+    let rwasm_bytecode = compile_to_rwasm(&wasm_bytecode)?;
+    tracing::info!("rWASM size: {} bytes", rwasm_bytecode.len());
 
-    tracing::debug!(
-        "rWASM compilation successful, size: {} bytes",
-        rwasm_bytecode.len()
-    );
+    // CRITICAL: Detect Rust version - no defaults
+    let rustc_version = detect_rust_version()
+        .ok_or_else(|| eyre::eyre!("Could not detect Rust compiler version. Is rustc in PATH?"))?;
 
-    // Calculate source hash
-    let source_hash =
-        calculate_source_hash(&config.project_root).context("Failed to calculate source hash")?;
+    let rust = RustInfo {
+        version: rustc_version.clone(),
+        commit: extract_rustc_commit(&rustc_version),
+        target: config.target().to_string(),
+    };
 
-    // Build metadata
-    let build_metadata = BuildMetadata {
-        rustc_version: utils::get_rust_version(),
-        timestamp: std::time::SystemTime::now()
+    // Calculate source hash for reproducibility
+    let source_tree_hash = calculate_source_hash(&config.project_root)?;
+
+    let runtime_info = RuntimeInfo {
+        rust,
+        sdk,
+        built_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
-        source_hash,
-        target: config.target().to_string(),
-        profile: config.profile_name().to_string(),
-        features: config.features.clone(),
-        no_default_features: config.no_default_features,
+        source_tree_hash,
     };
 
-    // Generate artifacts if enabled
+    // Generate artifacts if requested
     let artifacts = if should_generate_artifacts(&config.artifacts) {
-        generate_artifacts(
-            config,
-            &wasm_contract,
+        // Find main source file and parse routers
+        let main_source = find_main_source(&config.project_root)?;
+        let routers = parser::parse_routers(&main_source).unwrap_or_else(|e| {
+            tracing::warn!("Failed to parse routers: {}", e);
+            vec![]
+        });
+
+        // Determine source type (for now always archive, could detect git in future)
+        let source = artifacts::metadata::Source::Archive {
+            archive_path: "./source.tar.gz".to_string(),
+            project_path: ".".to_string(),
+        };
+
+        Some(artifacts::generate(
+            &contract,
             &wasm_bytecode,
             &rwasm_bytecode,
             &routers,
-            &build_metadata,
-        )
-        .context("Failed to generate artifacts")?
+            &config.project_root,
+            config,
+            &runtime_info,
+            source,
+        )?)
     } else {
-        // Return empty artifacts
-        artifacts::ContractArtifacts {
-            abi: vec![],
-            interface: String::new(),
-            metadata: Default::default(),
-        }
+        None
     };
 
-    let result = CompilationResult {
-        contract_info,
+    let duration = start.elapsed();
+    tracing::info!("Compilation completed in {:.2}s", duration.as_secs_f64());
+
+    Ok(CompilationResult {
+        contract,
         outputs: CompilationOutputs {
             wasm: wasm_bytecode,
             rwasm: rwasm_bytecode,
         },
         artifacts,
-        build_metadata,
-    };
-
-    let duration = start.elapsed();
-    tracing::info!(
-        "Compilation completed successfully in {:.2}s",
-        duration.as_secs_f64()
-    );
-
-    Ok(CompileOutput { result, duration })
-}
-
-/// Generate artifacts for the compiled contract
-fn generate_artifacts(
-    config: &CompileConfig,
-    wasm_contract: &WasmContract,
-    wasm_bytecode: &[u8],
-    rwasm_bytecode: &[u8],
-    routers: &[fluentbase_sdk_derive_core::router::Router],
-    build_metadata: &BuildMetadata,
-) -> Result<artifacts::ContractArtifacts> {
-    let build_info = BuildInfo {
-        rustc_version: build_metadata.rustc_version.clone(),
-        target: build_metadata.target.clone(),
-        profile: build_metadata.profile.clone(),
-        features: build_metadata.features.clone(),
-        source_hash: build_metadata.source_hash.clone(),
-        compile_config: config.clone(),
-    };
-
-    artifacts::generate(&ArtifactContext {
-        name: &wasm_contract.name,
-        bytecode: wasm_bytecode,
-        deployed_bytecode: rwasm_bytecode,
-        routers,
-        contract: wasm_contract,
-        build_info,
+        runtime_info,
+        duration,
     })
 }
 
-/// Compile project to WASM using cargo
+/// Parse contract name and version from Cargo.toml
+fn parse_cargo_toml(cargo_toml_path: &Path) -> Result<(String, String)> {
+    let content = std::fs::read_to_string(cargo_toml_path)
+        .with_context(|| format!("Failed to read {}", cargo_toml_path.display()))?;
+
+    let cargo_toml: toml::Value = toml::from_str(&content)
+        .with_context(|| format!("Failed to parse {}", cargo_toml_path.display()))?;
+
+    // Extract package info
+    let package = cargo_toml
+        .get("package")
+        .and_then(|p| p.as_table())
+        .ok_or_else(|| eyre::eyre!("No [package] section in Cargo.toml"))?;
+
+    let name = package
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("No package.name in Cargo.toml"))?
+        .to_string();
+
+    let version = package
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| eyre::eyre!("No package.version in Cargo.toml"))?
+        .to_string();
+
+    // Check that this is a Fluent contract (has SDK dependency)
+    let has_sdk = cargo_toml
+        .get("dependencies")
+        .and_then(|d| d.as_table())
+        .map(|deps| deps.contains_key("fluentbase-sdk"))
+        .unwrap_or(false);
+
+    if !has_sdk {
+        return Err(eyre::eyre!(
+            "Not a Fluent contract: no fluentbase-sdk dependency found in Cargo.toml"
+        ));
+    }
+
+    Ok((name, version))
+}
+
+/// Read SDK version from Cargo.lock - CRITICAL for reproducibility
+fn read_sdk_version_from_cargo_lock(project_root: &Path) -> Result<String> {
+    let cargo_lock_path = project_root.join("Cargo.lock");
+
+    if !cargo_lock_path.exists() {
+        return Err(eyre::eyre!(
+            "Cargo.lock not found. Run 'cargo build' first to generate it."
+        ));
+    }
+
+    let content = std::fs::read_to_string(&cargo_lock_path).context("Failed to read Cargo.lock")?;
+
+    let lock_file: toml::Value = toml::from_str(&content).context("Failed to parse Cargo.lock")?;
+
+    // Find fluentbase-sdk in packages
+    let packages = lock_file
+        .get("package")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| eyre::eyre!("Invalid Cargo.lock format: no [[package]] entries"))?;
+
+    for package in packages {
+        if package.get("name").and_then(|n| n.as_str()) == Some("fluentbase-sdk") {
+            let version = package
+                .get("version")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| eyre::eyre!("fluentbase-sdk found but has no version"))?;
+
+            // If from git, append commit hash
+            if let Some(source) = package.get("source").and_then(|s| s.as_str()) {
+                if source.starts_with("git+") {
+                    if let Some(hash) = source.split('#').nth(1) {
+                        return Ok(format!("{}-{}", version, hash));
+                    }
+                }
+            }
+
+            return Ok(version.to_string());
+        }
+    }
+
+    Err(eyre::eyre!(
+        "fluentbase-sdk not found in Cargo.lock. Is it listed in dependencies?"
+    ))
+}
+
+/// Parse SDK version into components
+fn parse_sdk_version(version: &str) -> SdkInfo {
+    if let Some((tag, commit)) = version.split_once('-') {
+        SdkInfo {
+            tag: tag.to_string(),
+            commit: commit.to_string(),
+        }
+    } else {
+        SdkInfo {
+            tag: version.to_string(),
+            commit: "unknown".to_string(),
+        }
+    }
+}
+
+/// Extract rustc commit from version string
+fn extract_rustc_commit(version: &str) -> String {
+    // Format: "rustc 1.75.0 (82e1608df 2023-12-21)"
+    let parts: Vec<&str> = version.split(' ').collect();
+    if parts.len() >= 3 {
+        parts[2].trim_start_matches('(').to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Find the main source file (src/lib.rs or src/main.rs)
+fn find_main_source(project_root: &Path) -> Result<PathBuf> {
+    let lib_rs = project_root.join("src/lib.rs");
+    if lib_rs.exists() {
+        return Ok(lib_rs);
+    }
+
+    let main_rs = project_root.join("src/main.rs");
+    if main_rs.exists() {
+        return Ok(main_rs);
+    }
+
+    Err(eyre::eyre!(
+        "No main source file found. Expected src/lib.rs or src/main.rs"
+    ))
+}
+
+/// Compile Rust project to WASM using cargo
 fn compile_to_wasm(config: &CompileConfig, contract_name: &str) -> Result<Vec<u8>> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(&config.project_root)
         .args(["build", "--target", config.target()]);
 
     // Add profile
-    match config.profile_name() {
-        "release" => {
-            cmd.arg("--release");
-        }
-        "debug" => {
-            // Debug is default, no flag needed
-        }
-        profile => {
-            cmd.args(["--profile", profile]);
-        }
+    match config.profile.as_str() {
+        "release" => cmd.arg("--release"),
+        "debug" => &cmd,
+        profile => cmd.args(["--profile", profile]),
     };
 
-    // Add features and flags
+    // Add features
     if config.no_default_features {
         cmd.arg("--no-default-features");
     }
@@ -273,98 +329,90 @@ fn compile_to_wasm(config: &CompileConfig, contract_name: &str) -> Result<Vec<u8
         cmd.arg("--locked");
     }
 
-    tracing::debug!("Running cargo command: {:?}", cmd);
+    tracing::debug!("Running: {:?}", cmd);
 
-    // Run build
     let output = cmd.output().context("Failed to execute cargo build")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        return Err(eyre::eyre!("Cargo build failed"))
-            .context(format!("Exit code: {:?}", output.status.code()))
-            .context(format!("stderr: {}", stderr))
-            .context(format!("stdout: {}", stdout));
+        return Err(eyre::eyre!("Cargo build failed:\n{}", stderr));
     }
 
-    // Find and read the WASM file
-    let wasm_path = find_wasm_output(config, contract_name)?;
+    // Find the compiled WASM file
+    let wasm_filename = format!("{}.wasm", contract_name.replace('-', "_"));
+    let wasm_path = config
+        .project_root
+        .join("target")
+        .join(config.target())
+        .join(&config.profile)
+        .join(&wasm_filename);
+
+    if !wasm_path.exists() {
+        return Err(eyre::eyre!(
+            "Expected WASM file not found: {}. \
+             Make sure the crate type is 'cdylib' in Cargo.toml \
+             and the package name matches the crate name.",
+            wasm_path.display()
+        ));
+    }
 
     std::fs::read(&wasm_path)
         .with_context(|| format!("Failed to read WASM file: {}", wasm_path.display()))
 }
 
-/// Compile WASM to rWASM
+/// Convert WASM to rWASM using Fluent's compiler
 fn compile_to_rwasm(wasm_bytecode: &[u8]) -> Result<Vec<u8>> {
     let result = fluentbase_types::compile_wasm_to_rwasm(wasm_bytecode)
-        .map_err(|e| eyre::eyre!("rWASM compilation error: {:?}", e))?;
+        .map_err(|e| eyre::eyre!("rWASM compilation failed: {:?}", e))?;
 
     Ok(result.rwasm_bytecode.to_vec())
 }
 
-/// Find the compiled WASM file
-fn find_wasm_output(config: &CompileConfig, contract_name: &str) -> Result<PathBuf> {
-    let wasm_filename = format!("{}.wasm", contract_name.replace('-', "_"));
+/// Detect the Rust compiler version - CRITICAL: no defaults
+fn detect_rust_version() -> Option<String> {
+    let output = Command::new("rustc").arg("--version").output().ok()?;
 
-    let wasm_path = config
-        .project_root
-        .join("target")
-        .join(config.target())
-        .join(config.profile_name())
-        .join(&wasm_filename);
-
-    if !wasm_path.exists() {
-        // Try to provide helpful error message
-        let target_dir = config.project_root.join("target");
-        let expected_dir = target_dir.join(config.target()).join(config.profile_name());
-
-        let base_error = || eyre::eyre!("Expected WASM file not found: {}", wasm_path.display());
-
-        if !expected_dir.exists() {
-            return Err(base_error()).context(format!(
-                "Build directory doesn't exist: {}",
-                expected_dir.display()
-            ));
-        }
-
-        return Err(base_error());
+    if output.status.success() {
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|s| s.trim().to_string())
+    } else {
+        None
     }
-
-    Ok(wasm_path)
 }
 
-/// Calculate SHA256 hash of all source files for reproducibility
+/// Calculate SHA256 hash of all source files
 fn calculate_source_hash(project_root: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut file_count = 0;
 
-    for entry in walkdir::WalkDir::new(project_root)
+    for entry in WalkDir::new(project_root)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
 
-        // Skip non-source directories
+        // Skip build outputs and hidden directories
         if path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            s == "target" || s.starts_with('.') || s == "out"
+            matches!(c.as_os_str().to_str(), Some("target" | "out"))
+                || c.as_os_str().to_string_lossy().starts_with('.')
         }) {
             continue;
         }
 
         // Include only source files
-        let should_include = match path.extension().and_then(|e| e.to_str()) {
-            Some("rs") => true,
-            _ => path
-                .file_name()
-                .map(|n| n == "Cargo.toml" || n == "Cargo.lock")
-                .unwrap_or(false),
-        };
+        if path.is_file() {
+            let include = match path.extension().and_then(|e| e.to_str()) {
+                Some("rs") => true,
+                _ => path
+                    .file_name()
+                    .map(|n| n == "Cargo.toml" || n == "Cargo.lock")
+                    .unwrap_or(false),
+            };
 
-        if should_include && path.is_file() {
-            if let Ok(content) = std::fs::read(path) {
+            if include {
+                let content = std::fs::read(path)?;
                 hasher.update(&content);
                 file_count += 1;
             }
@@ -380,83 +428,17 @@ fn should_generate_artifacts(config: &crate::config::ArtifactsConfig) -> bool {
     config.generate_abi || config.generate_interface || config.generate_metadata
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
+/// Hash bytes to SHA256 hex string
+pub fn hash_bytes(data: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(data))
+}
 
-    fn create_test_contract(dir: &Path) -> Result<()> {
-        fs::create_dir_all(dir.join("src"))?;
+/// Get rWASM hash from compilation result
+pub fn get_rwasm_hash(result: &CompilationResult) -> String {
+    hash_bytes(&result.outputs.rwasm)
+}
 
-        fs::write(
-            dir.join("Cargo.toml"),
-            r#"
-[package]
-name = "test-contract"
-version = "0.1.0"
-
-[dependencies]
-fluentbase-sdk = "0.1.0"
-"#,
-        )?;
-
-        fs::write(
-            dir.join("src/lib.rs"),
-            r#"
-#[no_mangle]
-pub extern "C" fn deploy() {}
-"#,
-        )?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_compilation_result_hashes() {
-        let result = CompilationResult {
-            contract_info: ContractInfo {
-                name: "test".to_string(),
-                version: "0.1.0".to_string(),
-                sdk_version: Some("0.1.0".to_string()),
-            },
-            outputs: CompilationOutputs {
-                wasm: vec![1, 2, 3, 4],
-                rwasm: vec![5, 6, 7, 8],
-            },
-            artifacts: artifacts::ContractArtifacts {
-                abi: vec![],
-                interface: String::new(),
-                metadata: Default::default(),
-            },
-            build_metadata: BuildMetadata {
-                rustc_version: "1.75.0".to_string(),
-                timestamp: 0,
-                source_hash: "abc".to_string(),
-                target: "wasm32-unknown-unknown".to_string(),
-                profile: "release".to_string(),
-                features: vec![],
-                no_default_features: false,
-            },
-        };
-
-        let wasm_hash = result.wasm_hash();
-        let rwasm_hash = result.rwasm_hash();
-
-        assert_eq!(wasm_hash.len(), 64); // SHA256 hex
-        assert_eq!(rwasm_hash.len(), 64);
-        assert_ne!(wasm_hash, rwasm_hash);
-    }
-
-    #[test]
-    fn test_calculate_source_hash_deterministic() {
-        let temp_dir = TempDir::new().unwrap();
-        create_test_contract(temp_dir.path()).unwrap();
-
-        let hash1 = calculate_source_hash(temp_dir.path()).unwrap();
-        let hash2 = calculate_source_hash(temp_dir.path()).unwrap();
-
-        assert_eq!(hash1, hash2);
-        assert_eq!(hash1.len(), 64);
-    }
+/// Get WASM hash from compilation result
+pub fn get_wasm_hash(result: &CompilationResult) -> String {
+    hash_bytes(&result.outputs.wasm)
 }

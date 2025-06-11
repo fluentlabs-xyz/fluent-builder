@@ -22,7 +22,7 @@ fluent-compiler compile ./my-contract
 # Custom output directory
 fluent-compiler compile -o ./build
 
-# Create source archive for verification
+# Create source archive 
 fluent-compiler compile --archive
 
 # Output JSON (for CI/CD)

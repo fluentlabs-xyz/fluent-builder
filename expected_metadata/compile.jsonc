@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "contract": {
+    "name": "power-calculator",
+    "version": "0.1.0"
+  },
+  
+  // Source variant 1: Archive-based
+  "source": {
+    "type": "archive",
+    "archive_path": "./snapshot.tar.gz",  // Path to source archive
+    "project_path": "contracts/power-calculator"  // Path to Cargo.toml inside archive
+  },
+  
+  // Source variant 2: Git-based
+  "source": {
+    "type": "git", 
+    "repository": "https://github.com/example/contracts.git",
+    "commit": "abc123def456789",  // Full commit hash for reproducibility
+    "project_path": "contracts/power-calculator"  // Path to Cargo.toml from repo root
+  },
+  
+  "compilation_settings": {
+    "rust": {
+      "version": "rustc 1.89.0-nightly (414482f6a 2025-05-13)",
+      "commit": "414482f6a",
+      "target": "wasm32-unknown-unknown"  // Build target, critical for reproducibility
+    },
+    "sdk": {
+      "tag": "0.1.0-dev",
+      "commit": "acbf4f6a26c2a441b101c6d50e6cc096b1e7e4c7"
+    },
+    "build_cfg": {
+      "profile": "release",
+      "features": [],
+      "no_default_features": true,
+      "locked": true  // Must be true to prevent dependency updates
+    }
+  },
+  
+  "built_at": 1749647809,  // Unix timestamp
+  
+  "bytecode": {
+    "wasm": {
+      "hash": "sha256:...",  // SHA256 hash of the file
+      "size": 38228,         // File size in bytes
+      "path": "lib.wasm"     // Path relative to metadata.json
+    },
+    "rwasm": {
+      "hash": "sha256:...",
+      "size": 59496,
+      "path": "lib.rwasm"
+    }
+  },
+  
+  // Optional section, present only if contract uses #[router] macro
+  "solidity_compatibility": {
+    "abi_path": "abi.json",
+    "interface_path": "interface.sol", 
+    "function_selectors": {  // 4-byte Keccak selectors
+      "power(uint256,uint256)": "0xc04f01fc"
+    }
+  },
+  
+  "dependencies": {
+    "cargo_lock_hash": "sha256:..."  // Hash of Cargo.lock file
+  },
+  
+  // Optional: if building inside a workspace
+  "workspace_root": ".",  // Path from project_path to workspace root
+  
+  "toolchain_hash": "sha256:...",    // Combined hash of Rust + SDK versions
+  "source_tree_hash": "sha256:..."   // Hash of all source files
+}

@@ -1,65 +1,56 @@
-//! Configuration types for WASM compilation and artifact generation
+//! Configuration for WASM contract compilation
 
 use eyre::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// Main configuration for contract compilation
+/// Configuration for compiling a Rust smart contract
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CompileConfig {
-    /// Project root directory containing the Rust contract
+    /// Project root directory containing Cargo.toml
     pub project_root: PathBuf,
 
-    /// Output directory for all generated artifacts
-    /// If relative, it's relative to project_root
+    /// Output directory for artifacts
     pub output_dir: PathBuf,
 
-    /// Build profile (debug, release, or custom)
-    pub profile: BuildProfile,
+    /// Build profile: "debug", "release", or a custom profile name
+    pub profile: String,
 
-    /// Features to enable during compilation
+    /// Cargo features to enable during compilation
     pub features: Vec<String>,
 
-    /// Whether to disable default features
+    /// Whether to use --no-default-features
     pub no_default_features: bool,
 
-    /// Whether to use locked dependencies (--locked flag)
+    /// Whether to use --locked for reproducible builds
     pub locked: bool,
 
-    /// Artifact generation settings
+    /// Which artifacts to generate
     pub artifacts: ArtifactsConfig,
 }
 
-/// Configuration for artifact generation
+/// Controls which artifacts are generated during compilation
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ArtifactsConfig {
-    /// Whether to generate Solidity interface file (.sol)
-    pub generate_interface: bool,
-
-    /// Whether to generate Solidity ABI file (.json)
+    /// Generate Solidity ABI (abi.json)
     pub generate_abi: bool,
 
-    /// Whether to generate metadata file with build info
+    /// Generate Solidity interface (interface.sol)
+    pub generate_interface: bool,
+
+    /// Generate verification metadata (metadata.json)
     pub generate_metadata: bool,
 
-    /// Whether to pretty-print JSON artifacts
+    /// Pretty-print JSON files
     pub pretty_json: bool,
-}
-
-/// Build profile for compilation
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum BuildProfile {
-    Debug,
-    Release,
-    Custom(String),
 }
 
 impl Default for CompileConfig {
     fn default() -> Self {
         Self {
-            project_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project_root: PathBuf::from("."),
             output_dir: PathBuf::from("out"),
-            profile: BuildProfile::Release,
+            profile: "release".to_string(),
             features: vec![],
             no_default_features: true,
             locked: false,
@@ -71,8 +62,8 @@ impl Default for CompileConfig {
 impl Default for ArtifactsConfig {
     fn default() -> Self {
         Self {
-            generate_interface: true,
             generate_abi: true,
+            generate_interface: true,
             generate_metadata: true,
             pretty_json: true,
         }
@@ -80,7 +71,15 @@ impl Default for ArtifactsConfig {
 }
 
 impl CompileConfig {
-    /// Returns the absolute output directory path
+    /// Create a new config for the given project directory
+    pub fn new(project_root: impl Into<PathBuf>) -> Self {
+        Self {
+            project_root: project_root.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Get the absolute output directory path
     pub fn output_directory(&self) -> PathBuf {
         if self.output_dir.is_absolute() {
             self.output_dir.clone()
@@ -89,29 +88,13 @@ impl CompileConfig {
         }
     }
 
-    /// Returns the target triple for WASM compilation
+    /// Get the target triple for WASM compilation
     pub fn target(&self) -> &str {
         "wasm32-unknown-unknown"
     }
 
-    /// Returns the profile name as used by cargo
-    pub fn profile_name(&self) -> &str {
-        match &self.profile {
-            BuildProfile::Debug => "debug",
-            BuildProfile::Release => "release",
-            BuildProfile::Custom(name) => name,
-        }
-    }
-
-    /// Validates the entire configuration
+    /// Validate that the configuration is valid
     pub fn validate(&self) -> Result<()> {
-        // self.validate_project_root()?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    /// Validates that the project root exists and contains a Cargo.toml
-    fn validate_project_root(&self) -> Result<()> {
         if !self.project_root.exists() {
             return Err(eyre::eyre!(
                 "Project root does not exist: {}",
@@ -129,174 +112,56 @@ impl CompileConfig {
 
         Ok(())
     }
-
-    /// Create a new builder for CompileConfig
-    pub fn builder() -> CompileConfigBuilder {
-        CompileConfigBuilder::default()
-    }
-}
-
-/// Builder for creating CompileConfig with a fluent API
-#[derive(Default)]
-pub struct CompileConfigBuilder {
-    config: CompileConfig,
-}
-
-impl CompileConfigBuilder {
-    /// Set the project root directory
-    pub fn project_root(mut self, path: PathBuf) -> Self {
-        self.config.project_root = path;
-        self
-    }
-
-    /// Set the output directory
-    pub fn output_dir(mut self, path: PathBuf) -> Self {
-        self.config.output_dir = path;
-        self
-    }
-
-    /// Set the build profile by name
-    pub fn profile(mut self, profile: &str) -> Self {
-        self.config.profile = match profile {
-            "debug" => BuildProfile::Debug,
-            "release" => BuildProfile::Release,
-            custom => BuildProfile::Custom(custom.to_string()),
-        };
-        self
-    }
-
-    /// Set the build profile directly
-    pub fn build_profile(mut self, profile: BuildProfile) -> Self {
-        self.config.profile = profile;
-        self
-    }
-
-    /// Set features to enable
-    pub fn features(mut self, features: Vec<String>) -> Self {
-        self.config.features = features;
-        self
-    }
-
-    /// Add a single feature
-    pub fn feature(mut self, feature: String) -> Self {
-        self.config.features.push(feature);
-        self
-    }
-
-    /// Set whether to disable default features
-    pub fn no_default_features(mut self, no_default: bool) -> Self {
-        self.config.no_default_features = no_default;
-        self
-    }
-
-    /// Set whether to use --locked
-    pub fn locked(mut self, locked: bool) -> Self {
-        self.config.locked = locked;
-        self
-    }
-
-    /// Configure artifact generation
-    pub fn artifacts(mut self, configure: impl FnOnce(&mut ArtifactsConfig)) -> Self {
-        configure(&mut self.config.artifacts);
-        self
-    }
-
-    /// Disable all artifact generation
-    pub fn no_artifacts(mut self) -> Self {
-        self.config.artifacts.generate_interface = false;
-        self.config.artifacts.generate_abi = false;
-        self.config.artifacts.generate_metadata = false;
-        self
-    }
-
-    /// Enable only ABI generation (useful for verification)
-    pub fn abi_only(mut self) -> Self {
-        self.config.artifacts.generate_interface = false;
-        self.config.artifacts.generate_abi = true;
-        self.config.artifacts.generate_metadata = false;
-        self
-    }
-
-    /// Build and validate the configuration
-    pub fn build(self) -> Result<CompileConfig> {
-        self.config.validate()?;
-        Ok(self.config)
-    }
-}
-
-/// Simplified compilation settings matching CLI structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompileSettings {
-    pub profile: String,
-    pub features: Vec<String>,
-    pub no_default_features: bool,
-}
-
-impl CompileSettings {
-    /// Convert to full CompileConfig
-    pub fn to_config(self, project_root: PathBuf) -> CompileConfig {
-        CompileConfig::builder()
-            .project_root(project_root)
-            .profile(&self.profile)
-            .features(self.features)
-            .no_default_features(self.no_default_features)
-            .build()
-            .expect("Invalid settings")
-    }
-}
-
-impl From<CompileSettings> for CompileConfig {
-    fn from(settings: CompileSettings) -> Self {
-        settings.to_config(PathBuf::from("."))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn create_test_project() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
+        dir
+    }
 
     #[test]
     fn test_default_config() {
         let config = CompileConfig::default();
+        assert_eq!(config.profile, "release");
         assert_eq!(config.target(), "wasm32-unknown-unknown");
-        assert_eq!(config.profile, BuildProfile::Release);
         assert!(config.no_default_features);
-        assert!(config.artifacts.generate_interface);
-        assert!(config.artifacts.generate_abi);
         assert!(config.artifacts.generate_metadata);
     }
 
     #[test]
-    fn test_builder_basic() {
-        let config = CompileConfig::builder()
-            .project_root(PathBuf::from("/test"))
-            .output_dir(PathBuf::from("build"))
-            .profile("debug")
-            .features(vec!["test".to_string()])
-            .no_default_features(true)
-            .build()
-            .unwrap();
+    fn test_new_config() {
+        let project = create_test_project();
+        let config = CompileConfig::new(project.path());
 
-        println!("config: {:?}", config);
-
-        assert_eq!(config.project_root, PathBuf::from("/test"));
-        assert_eq!(config.output_dir, PathBuf::from("build"));
-        assert_eq!(config.profile, BuildProfile::Debug);
-        assert_eq!(config.features, vec!["test"]);
-        assert!(config.no_default_features);
+        assert_eq!(config.project_root, project.path());
+        assert_eq!(config.output_dir, PathBuf::from("out"));
+        assert_eq!(config.profile, "release");
     }
 
     #[test]
-    fn test_compile_settings() {
-        let settings = CompileSettings {
-            profile: "release".to_string(),
-            features: vec!["production".to_string()],
-            no_default_features: true,
-        };
+    fn test_validation() {
+        let project = create_test_project();
+        let config = CompileConfig::new(project.path());
+        assert!(config.validate().is_ok());
 
-        let config = settings.to_config(PathBuf::from("/test"));
-        assert_eq!(config.profile, BuildProfile::Release);
-        assert_eq!(config.features, vec!["production"]);
-        assert!(config.no_default_features);
+        let bad_config = CompileConfig::new("/nonexistent/path");
+        assert!(bad_config.validate().is_err());
+    }
+
+    #[test]
+    fn test_output_directory() {
+        let config = CompileConfig::new("/project");
+        assert_eq!(config.output_directory(), PathBuf::from("/project/out"));
+
+        let mut config = CompileConfig::new("/project");
+        config.output_dir = PathBuf::from("/absolute/out");
+        assert_eq!(config.output_directory(), PathBuf::from("/absolute/out"));
     }
 }
