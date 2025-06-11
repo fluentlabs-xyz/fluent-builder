@@ -1,153 +1,185 @@
 //! Verification-focused metadata for reproducible builds
 
 use super::{Abi, ArtifactContext};
-use crate::utils;
-use eyre::Result;
+use crate::{
+    config::{BuildProfile, CompileConfig},
+    contract::WasmContract,
+    utils,
+};
+use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-/// Main metadata structure optimized for verification
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Compact metadata structure optimized for verification
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Metadata {
-    /// Contract name from Cargo.toml
-    pub contract_name: String,
+    /// Contract information from Cargo.toml
+    pub contract: ContractMetadata,
 
-    /// Contract ABI
+    /// Bytecode hashes and sizes (no actual bytecode)
+    pub bytecode: BytecodeMetadata,
+
+    /// Contract ABI (only present if contract has #[router] macro)
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub abi: Abi,
 
     /// Method signatures to selectors mapping
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
     pub method_identifiers: BTreeMap<String, String>,
 
-    /// Compiled bytecodes
-    pub bytecodes: Bytecodes,
+    /// Compiler and build environment information
+    pub compiler: CompilerMetadata,
 
-    /// Build metadata for reproducibility
-    pub build_metadata: BuildMetadata,
+    /// Build configuration used
+    pub build_config: BuildConfigMetadata,
+
+    /// Metadata format version
+    pub version: u32,
 }
 
-/// Compiled bytecode information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Bytecodes {
-    /// WASM bytecode
-    pub wasm: BytecodeInfo,
-    /// rWASM bytecode (deployed)
-    pub rwasm: BytecodeInfo,
+/// Contract metadata extracted from Cargo.toml and Cargo.lock
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContractMetadata {
+    /// Contract name from package.name
+    pub name: String,
+    /// Contract version from package.version
+    pub version: String,
+    /// SDK version (required for verification)
+    pub sdk_version: String,
 }
 
-/// Information about a bytecode artifact
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BytecodeInfo {
-    /// Hex-encoded bytecode with 0x prefix
-    pub object: String,
+impl From<&WasmContract> for ContractMetadata {
+    fn from(contract: &WasmContract) -> Self {
+        Self {
+            name: contract.name.clone(),
+            version: contract.version.clone(),
+            sdk_version: contract.sdk_version.clone().unwrap_or_default(),
+        }
+    }
+}
+
+/// Bytecode information without actual bytecode
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BytecodeMetadata {
+    /// WASM artifact info
+    pub wasm: ArtifactInfo,
+    /// rWASM artifact info (deployed bytecode)
+    pub rwasm: ArtifactInfo,
+}
+
+/// Information about a single artifact
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ArtifactInfo {
     /// SHA256 hash of the bytecode
     pub hash: String,
     /// Size in bytes
     pub size: usize,
-}
-
-/// Build metadata matching the proto definition
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildMetadata {
-    /// Compiler information
-    pub compiler: CompilerInfo,
-
-    /// Programming language
-    pub language: String,
-
-    /// Output artifacts info (matches proto BuildOutputInfo)
-    pub output: BuildOutputInfo,
-
-    /// Build settings used
-    pub settings: BuildSettings,
-
-    /// Source files information
-    pub sources: BTreeMap<String, SourceFileInfo>,
-
-    /// Metadata format version
-    pub metadata_format_version: u32,
 }
 
 /// Compiler information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompilerInfo {
-    /// Compiler name (always "rustc" for Rust contracts)
-    pub name: String,
-    /// Full version string
-    pub version: String,
-    /// Commit hash if available
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CompilerMetadata {
+    /// Rust compiler version (full string, e.g., "rustc 1.75.0 (82e1608df 2023-12-21)")
+    pub rustc_version: String,
+    /// Rust compiler commit hash extracted from version string
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commit: Option<String>,
+    pub rustc_commit: Option<String>,
+    /// Target triple (always "wasm32-unknown-unknown" for WASM)
+    pub target: String,
+    /// Compilation timestamp (UTC seconds)
+    pub timestamp: u64,
 }
 
-/// Build output information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildOutputInfo {
-    /// WASM artifact info
-    pub wasm: WasmArtifactInfo,
-    /// rWASM artifact info
-    pub rwasm: WasmArtifactInfo,
-}
-
-/// Information about a WASM/rWASM artifact
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WasmArtifactInfo {
-    /// SHA256 hash of the bytecode
-    pub hash: String,
-    /// Size in bytes
-    pub size: usize,
-}
-
-/// Build settings for reproducibility
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildSettings {
-    /// Target triple
-    pub target_triple: String,
-    /// Build profile
+/// Build configuration metadata (subset of CompileConfig relevant for verification)
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BuildConfigMetadata {
+    /// Build profile used
     pub profile: String,
-    /// Enabled features
+    /// Features enabled during compilation
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub features: Vec<String>,
     /// Whether default features were disabled
     pub no_default_features: bool,
-    /// Contract-specific information
-    pub contract_info: ContractBuildInfo,
-    /// Build timestamp (UTC seconds)
-    pub build_time_utc_seconds: u64,
-    /// Cargo flags used
-    pub cargo_flags_used: Vec<String>,
-    /// RUSTFLAGS if set
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rustflags: Option<String>,
+    /// Whether --locked flag was used
+    pub locked: bool,
 }
 
-/// Contract build information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContractBuildInfo {
-    /// Path to Cargo.toml relative to source root
-    pub path_to_cargo_toml: String,
-    /// Package name
-    pub name: String,
-    /// Package version
-    pub version: String,
-    /// SDK version used
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sdk_version: Option<String>,
+impl From<&CompileConfig> for BuildConfigMetadata {
+    fn from(config: &CompileConfig) -> Self {
+        Self {
+            profile: match &config.profile {
+                BuildProfile::Debug => "debug".to_string(),
+                BuildProfile::Release => "release".to_string(),
+                BuildProfile::Custom(name) => name.clone(),
+            },
+            features: config.features.clone(),
+            no_default_features: config.no_default_features,
+            locked: config.locked,
+        }
+    }
 }
 
-/// Source file information
+impl Metadata {
+    /// Extract rustc version number (e.g., "1.75.0" from "rustc 1.75.0 (82e1608df 2023-12-21)")
+    pub fn rustc_version_number(&self) -> Option<&str> {
+        self.compiler.rustc_version.split_whitespace().nth(1)
+    }
+
+    /// Get SDK version
+    pub fn sdk_version(&self) -> &str {
+        &self.contract.sdk_version
+    }
+
+    /// Check if contract has ABI (i.e., has #[router] macro)
+    pub fn has_abi(&self) -> bool {
+        !self.abi.is_empty()
+    }
+
+    /// Get the deployed bytecode hash (rWASM)
+    pub fn deployed_bytecode_hash(&self) -> &str {
+        &self.bytecode.rwasm.hash
+    }
+
+    /// Convert metadata to proto CompileSettings for verification request
+    pub fn to_compile_settings(&self) -> CompileSettings {
+        CompileSettings {
+            rustc_version: self.compiler.rustc_version.clone(),
+            sdk_version: self.contract.sdk_version.clone(),
+            profile: self.build_config.profile.clone(),
+            features: self.build_config.features.clone(),
+            no_default_features: self.build_config.no_default_features,
+        }
+    }
+
+    /// Get ABI as JSON string
+    pub fn abi_json(&self) -> Result<String> {
+        if self.abi.is_empty() {
+            Ok("[]".to_string())
+        } else {
+            serde_json::to_string(&self.abi).context("Failed to serialize ABI to JSON")
+        }
+    }
+}
+
+/// Proto-compatible compile settings structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceFileInfo {
-    /// SHA256 hash of file content
-    pub content_hash: String,
-    /// SPDX license identifier if found
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub license_identifier: Option<String>,
+pub struct CompileSettings {
+    pub rustc_version: String,
+    pub sdk_version: String,
+    pub profile: String,
+    pub features: Vec<String>,
+    pub no_default_features: bool,
 }
 
 /// Generates verification-optimized metadata
 pub fn generate(ctx: &ArtifactContext<'_>, abi: &Abi) -> Result<Metadata> {
-    let wasm_hash = utils::hash_bytes(ctx.bytecode);
-    let rwasm_hash = utils::hash_bytes(ctx.deployed_bytecode);
+    // Ensure SDK version is present
+    if ctx.contract.sdk_version.is_none() {
+        return Err(eyre::eyre!(
+            "SDK version is required for metadata generation. \
+             Ensure Cargo.lock exists and contains fluentbase-sdk"
+        ));
+    }
 
     let timestamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -155,57 +187,55 @@ pub fn generate(ctx: &ArtifactContext<'_>, abi: &Abi) -> Result<Metadata> {
         .unwrap_or(0);
 
     Ok(Metadata {
-        contract_name: ctx.name.to_string(),
-        abi: abi.clone(),
-        method_identifiers: extract_method_identifiers(abi),
-        bytecodes: Bytecodes {
-            wasm: BytecodeInfo {
-                object: utils::bytes_to_hex(ctx.bytecode),
-                hash: wasm_hash.clone(),
+        contract: ContractMetadata::from(ctx.contract),
+        bytecode: BytecodeMetadata {
+            wasm: ArtifactInfo {
+                hash: utils::hash_bytes(ctx.bytecode),
                 size: ctx.bytecode.len(),
             },
-            rwasm: BytecodeInfo {
-                object: utils::bytes_to_hex(ctx.deployed_bytecode),
-                hash: rwasm_hash.clone(),
+            rwasm: ArtifactInfo {
+                hash: utils::hash_bytes(ctx.deployed_bytecode),
                 size: ctx.deployed_bytecode.len(),
             },
         },
-        build_metadata: BuildMetadata {
-            compiler: CompilerInfo {
-                name: "rustc".to_string(),
-                version: ctx.build_info.rustc_version.clone(),
-                commit: extract_rustc_commit(&ctx.build_info.rustc_version),
-            },
-            language: "Rust".to_string(),
-            output: BuildOutputInfo {
-                wasm: WasmArtifactInfo {
-                    hash: wasm_hash,
-                    size: ctx.bytecode.len(),
-                },
-                rwasm: WasmArtifactInfo {
-                    hash: rwasm_hash,
-                    size: ctx.deployed_bytecode.len(),
-                },
-            },
-            settings: BuildSettings {
-                target_triple: ctx.build_info.target.clone(),
-                profile: ctx.build_info.profile.clone(),
-                features: ctx.build_info.features.clone(),
-                no_default_features: ctx.build_info.compile_config.wasm.no_default_features,
-                contract_info: ContractBuildInfo {
-                    path_to_cargo_toml: "Cargo.toml".to_string(), // Relative to project root
-                    name: ctx.contract.name.clone(),
-                    version: ctx.contract.version.clone(),
-                    sdk_version: ctx.contract.sdk_version.clone(),
-                },
-                build_time_utc_seconds: timestamp,
-                cargo_flags_used: ctx.build_info.compile_config.wasm.cargo_flags.clone(),
-                rustflags: ctx.build_info.compile_config.wasm.rustflags.clone(),
-            },
-            sources: collect_source_files(ctx)?,
-            metadata_format_version: 1,
+        abi: abi.clone(),
+        method_identifiers: if abi.is_empty() {
+            BTreeMap::new()
+        } else {
+            extract_method_identifiers(abi)
         },
+        compiler: CompilerMetadata {
+            rustc_version: ctx.build_info.rustc_version.clone(),
+            rustc_commit: extract_rustc_commit(&ctx.build_info.rustc_version),
+            target: ctx.build_info.target.clone(),
+            timestamp,
+        },
+        build_config: BuildConfigMetadata::from(&ctx.build_info.compile_config),
+        version: 2,
     })
+}
+
+/// Reads metadata from a JSON file
+pub fn read_from_file(path: &std::path::Path) -> Result<Metadata> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read metadata from {}", path.display()))?;
+
+    serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse metadata from {}", path.display()))
+}
+
+/// Writes metadata to a JSON file
+pub fn write_to_file(metadata: &Metadata, path: &std::path::Path, pretty: bool) -> Result<()> {
+    let json = if pretty {
+        serde_json::to_string_pretty(metadata)?
+    } else {
+        serde_json::to_string(metadata)?
+    };
+
+    std::fs::write(path, json)
+        .with_context(|| format!("Failed to write metadata to {}", path.display()))?;
+
+    Ok(())
 }
 
 /// Extracts method identifiers from ABI
@@ -235,86 +265,6 @@ fn extract_method_identifiers(abi: &Abi) -> BTreeMap<String, String> {
     identifiers
 }
 
-/// Collects source file information
-fn collect_source_files(ctx: &ArtifactContext<'_>) -> Result<BTreeMap<String, SourceFileInfo>> {
-    use walkdir::WalkDir;
-
-    let mut sources = BTreeMap::new();
-    let project_root = &ctx.build_info.compile_config.project_root;
-
-    for entry in WalkDir::new(project_root)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-
-        // Skip irrelevant directories
-        if should_skip_path(path) {
-            continue;
-        }
-
-        // Include only Rust source files and Cargo files
-        if !is_relevant_source_file(path) {
-            continue;
-        }
-
-        if let Ok(content) = std::fs::read_to_string(path) {
-            // Calculate SHA256 (not Keccak for better compatibility)
-            let hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(content.as_bytes());
-                format!("{:x}", hasher.finalize())
-            };
-
-            // Extract license
-            let license = extract_spdx_license(&content);
-
-            // Create relative path
-            let relative_path = path
-                .strip_prefix(project_root)
-                .unwrap_or(path)
-                .to_string_lossy()
-                .into_owned();
-
-            sources.insert(
-                relative_path,
-                SourceFileInfo {
-                    content_hash: hash,
-                    license_identifier: license,
-                },
-            );
-        }
-    }
-
-    Ok(sources)
-}
-
-/// Checks if a path should be skipped during source collection
-fn should_skip_path(path: &std::path::Path) -> bool {
-    path.components().any(|c| {
-        let name = c.as_os_str().to_string_lossy();
-        name == "target" || name.starts_with('.') || name == "out"
-    })
-}
-
-/// Checks if a file is relevant for source verification
-fn is_relevant_source_file(path: &std::path::Path) -> bool {
-    // Check extension
-    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ext == "rs" {
-            return true;
-        }
-    }
-
-    // Check specific files
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        matches!(name, "Cargo.toml" | "Cargo.lock")
-    } else {
-        false
-    }
-}
-
 /// Extracts rustc commit from version string
 fn extract_rustc_commit(version: &str) -> Option<String> {
     // Format: "rustc 1.75.0 (82e1608df 2023-12-21)"
@@ -324,25 +274,6 @@ fn extract_rustc_commit(version: &str) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Extracts SPDX license from source
-fn extract_spdx_license(content: &str) -> Option<String> {
-    for line in content.lines().take(10) {
-        if let Some(pos) = line.find("SPDX-License-Identifier:") {
-            let license = line[pos + 24..]
-                .trim()
-                .trim_end_matches("*/")
-                .trim_end_matches("-->")
-                .trim_end_matches("//")
-                .trim();
-
-            if !license.is_empty() {
-                return Some(license.to_string());
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -369,74 +300,116 @@ mod tests {
     }
 
     #[test]
-    fn test_metadata_structure_matches_proto() {
-        // This test ensures our Rust structure can be serialized to match proto
+    fn test_metadata_to_compile_settings() {
         let metadata = Metadata {
-            contract_name: "TestContract".to_string(),
-            abi: vec![],
-            method_identifiers: BTreeMap::new(),
-            bytecodes: Bytecodes {
-                wasm: BytecodeInfo {
-                    object: "0x0061736d".to_string(),
-                    hash: "abc123".to_string(),
-                    size: 4,
-                },
-                rwasm: BytecodeInfo {
-                    object: "0x0061736d01".to_string(),
-                    hash: "def456".to_string(),
-                    size: 5,
-                },
+            contract: ContractMetadata {
+                name: "test".to_string(),
+                version: "0.1.0".to_string(),
+                sdk_version: "0.5.0".to_string(),
             },
-            build_metadata: BuildMetadata {
-                compiler: CompilerInfo {
-                    name: "rustc".to_string(),
-                    version: "rustc 1.78.0 (9b00956e5 2024-04-29)".to_string(),
-                    commit: Some("9b00956e5".to_string()),
-                },
-                language: "Rust".to_string(),
-                output: BuildOutputInfo {
-                    wasm: WasmArtifactInfo {
-                        hash: "abc123".to_string(),
-                        size: 4,
-                    },
-                    rwasm: WasmArtifactInfo {
-                        hash: "def456".to_string(),
-                        size: 5,
-                    },
-                },
-                settings: BuildSettings {
-                    target_triple: "wasm32-unknown-unknown".to_string(),
-                    profile: "release".to_string(),
-                    features: vec!["wasm".to_string()],
-                    no_default_features: true,
-                    contract_info: ContractBuildInfo {
-                        path_to_cargo_toml: "Cargo.toml".to_string(),
-                        name: "test-contract".to_string(),
-                        version: "0.1.0".to_string(),
-                        sdk_version: Some("0.5.0".to_string()),
-                    },
-                    build_time_utc_seconds: 1234567890,
-                    cargo_flags_used: vec![],
-                    rustflags: None,
-                },
-                sources: BTreeMap::new(),
-                metadata_format_version: 1,
+            compiler: CompilerMetadata {
+                rustc_version: "rustc 1.75.0 (82e1608df 2023-12-21)".to_string(),
+                rustc_commit: Some("82e1608df".to_string()),
+                target: "wasm32-unknown-unknown".to_string(),
+                timestamp: 1234567890,
             },
+            build_config: BuildConfigMetadata {
+                profile: "release".to_string(),
+                features: vec!["production".to_string()],
+                no_default_features: true,
+                locked: false,
+            },
+            ..Default::default()
         };
 
-        // Should serialize without panic
-        let json = serde_json::to_string_pretty(&metadata).unwrap();
-        assert!(json.contains("test-contract"));
+        let settings = metadata.to_compile_settings();
+        assert_eq!(
+            settings.rustc_version,
+            "rustc 1.75.0 (82e1608df 2023-12-21)"
+        );
+        assert_eq!(settings.sdk_version, "0.5.0");
+        assert_eq!(settings.profile, "release");
+        assert_eq!(settings.features, vec!["production"]);
+        assert!(settings.no_default_features);
+    }
 
-        // Should be able to access nested fields as proto expects
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            value["build_metadata"]["compiler"]["name"].as_str(),
-            Some("rustc")
+    #[test]
+    fn test_compact_metadata_size() {
+        let metadata = Metadata {
+            contract: ContractMetadata {
+                name: "power-calculator".to_string(),
+                version: "0.1.0".to_string(),
+                sdk_version: "0.5.0".to_string(),
+            },
+            bytecode: BytecodeMetadata {
+                wasm: ArtifactInfo {
+                    hash: "a".repeat(64),
+                    size: 37888,
+                },
+                rwasm: ArtifactInfo {
+                    hash: "b".repeat(64),
+                    size: 59392,
+                },
+            },
+            compiler: CompilerMetadata {
+                rustc_version: "rustc 1.75.0 (82e1608df 2023-12-21)".to_string(),
+                rustc_commit: Some("82e1608df".to_string()),
+                target: "wasm32-unknown-unknown".to_string(),
+                timestamp: 1718148540,
+            },
+            build_config: BuildConfigMetadata {
+                profile: "release".to_string(),
+                features: vec![],
+                no_default_features: true,
+                locked: false,
+            },
+            abi: vec![json!({
+                "name": "calculate_power",
+                "type": "function",
+                "inputs": [
+                    {"name": "base", "type": "uint256"},
+                    {"name": "exponent", "type": "uint256"}
+                ],
+                "outputs": [{"name": "", "type": "uint256"}],
+                "stateMutability": "pure"
+            })],
+            method_identifiers: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    "calculate_power(uint256,uint256)".to_string(),
+                    "c4e41b3a".to_string(),
+                );
+                m
+            },
+            version: 2,
+        };
+
+        let json = serde_json::to_string_pretty(&metadata).unwrap();
+        println!("Metadata JSON:\n{}", json);
+        println!("\nMetadata size: {} bytes", json.len());
+
+        // Should be compact without source hashes
+        assert!(
+            json.len() < 2500,
+            "Metadata too large: {} bytes",
+            json.len()
         );
-        assert_eq!(
-            value["build_metadata"]["settings"]["contract_info"]["sdk_version"].as_str(),
-            Some("0.5.0")
-        );
+    }
+
+    #[test]
+    fn test_abi_json() {
+        let metadata = Metadata {
+            abi: vec![json!({
+                "name": "test",
+                "type": "function"
+            })],
+            ..Default::default()
+        };
+
+        let abi_json = metadata.abi_json().unwrap();
+        assert!(abi_json.contains("test"));
+
+        let empty_metadata = Metadata::default();
+        assert_eq!(empty_metadata.abi_json().unwrap(), "[]");
     }
 }

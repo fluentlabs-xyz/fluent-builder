@@ -1,7 +1,5 @@
 //! Blockchain interaction utilities for contract verification
 
-use crate::verify::calculate_bytecode_hash;
-use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Network configuration for blockchain interaction
@@ -59,11 +57,14 @@ pub struct DeployedContractInfo {
 
 #[cfg(feature = "ethers")]
 pub mod ethers {
+    use crate::utils;
+
     use super::*;
     use ::ethers::{
         providers::{Http, Middleware, Provider},
         types::Address,
     };
+    use eyre::{Context, Result};
     
     /// Fetch deployed bytecode hash from blockchain
     pub async fn fetch_bytecode_hash(
@@ -100,7 +101,7 @@ pub mod ethers {
         }
         
         // Calculate and return hash
-        let hash = calculate_bytecode_hash(&bytecode);
+        let hash = utils::hash_bytes(&bytecode);
         Ok(format!("0x{}", hash))
     }
     
@@ -139,7 +140,7 @@ pub mod ethers {
         }
         
         let bytecode_size = bytecode.len();
-        let bytecode_hash = format!("0x{}", calculate_bytecode_hash(&bytecode));
+        let bytecode_hash = format!("0x{}", utils::hash_bytes(&bytecode));
         
         Ok(DeployedContractInfo {
             address: contract_address.to_string(),

@@ -1,117 +1,206 @@
-# `fluent-compiler`
+# fluent-compiler
 
-The core Rust library for compiling smart contracts into WASM and rWASM for the Fluent ecosystem. It provides a flexible and powerful API for integrating a standardized, reproducible contract compilation workflow into developer tools and verification services.
+Core Rust library for compiling smart contracts to WASM and rWASM for the Fluent blockchain. Provides a comprehensive API for contract compilation, artifact generation, and verification.
 
-## Purpose
+## Features
 
-This library is the engine that powers tools like `fluent-compiler-cli`. It automates the entire build process, from analyzing Rust source code to generating a full suite of artifacts required for on-chain deployment and verification. It handles compiling Rust projects to WASM, converting WASM to rWASM, and generating all necessary metadata.
+- **Dual-format compilation**: Compiles Rust contracts to both WASM and rWASM in a single operation
+- **Automatic ABI generation**: Extracts ABI from Rust source using `#[router]` macros
+- **Artifact generation**: Creates Solidity interfaces, metadata, and verification archives
+- **Contract verification**: Verify deployed contracts against source code
+- **Flexible configuration**: Fine-grained control over compilation and artifact generation
 
-## Key Features
+## Installation
 
-* **Dual-Format Compilation:** Compiles Rust contracts to both standard WASM and the execution-optimized rWASM format in a single, streamlined operation.
-* **Automated Artifact Generation:** Produces essential development and verification artifacts, including a Solidity-compatible ABI, a Solidity `interface` file, and detailed, reproducible build metadata.
-* **Source Code Parsing:** Analyzes Rust source code using `syn` to automatically generate ABIs from `#[router]` macro attributes, eliminating the need for manual ABI definitions.
-* **Verifiable Archiving:** Creates source code archives (`.tar.gz` or `.zip`) that bundle all necessary files for reproducible, verifiable builds, a critical feature for verifiers.
-* **Flexible Configuration:** Offers granular control over the compilation process through the `CompileConfig` struct, including build profiles, features, target triples, and artifact generation options.
+```toml
+[dependencies]
+fluent-compiler = "0.1"
+
+# For blockchain integration (verification)
+fluent-compiler = { version = "0.1", features = ["ethers"] }
+```
 
 ## Basic Usage
 
-The library can be used to compile a contract and either process the results in-memory or save them to disk.
+### Simple Compilation
 
-**1. Compile and Access Artifacts In-Memory**
+```rust
+use fluent_compiler::{compile, CompileConfig};
 
-This example shows how to compile a contract and access the resulting bytecodes and ABI directly.
+// Compile with default settings
+let config = CompileConfig::default();
+let output = compile(&config)?;
+
+println!("Contract: {}", output.result.contract_info.name);
+println!("WASM size: {} bytes", output.result.outputs.wasm.len());
+println!("rWASM hash: {}", output.result.rwasm_hash());
+```
+
+### Using the Builder
 
 ```rust
 use fluent_compiler::{compile, CompileConfig};
 use std::path::PathBuf;
 
-// 1. Configure the compilation for a specific project.
-let mut config = CompileConfig::default();
-config.project_root = PathBuf::from("./path/to/my-contract");
+let config = CompileConfig::builder()
+    .project_root(PathBuf::from("./my-contract"))
+    .output_dir(PathBuf::from("./build"))
+    .profile("release")
+    .features(vec!["production".to_string()])
+    .no_default_features(true)
+    .build()?;
 
-// It's good practice to validate the configuration and project path.
-config.validate().expect("Invalid configuration");
-
-// 2. Run the compilation.
-match compile(&config) {
-    Ok(output) => {
-        println!("✅ Compilation successful in {:?}", output.duration);
-
-        // Access the compiled bytecodes.
-        let wasm_len = output.result.outputs.wasm.len();
-        let rwasm_len = output.result.outputs.rwasm.len();
-        println!("- WASM size: {} bytes", wasm_len);
-        println!("- rWASM size: {} bytes", rwasm_len);
-
-        // Access the generated ABI.
-        let abi_json = serde_json::to_string_pretty(&output.result.artifacts.abi).unwrap();
-        println!("- Generated ABI:\n{}", abi_json);
-    }
-    Err(e) => {
-        eprintln!("🔥 Compilation failed: {:?}", e);
-    }
-}
+let output = compile(&config)?;
 ```
 
-**2. Compile and Save All Artifacts to Disk**
-
-This is a common use case for local development or CI pipelines that need to store build artifacts.
+### Saving Artifacts
 
 ```rust
 use fluent_compiler::{compile, save_artifacts, ArtifactWriterOptions, CompileConfig};
-use std::path::PathBuf;
 
-// Define the project to compile.
-let config = CompileConfig {
-    project_root: PathBuf::from("./path/to/my-contract"),
-    ..Default::default()
-};
-config.validate().unwrap();
+// Compile the contract
+let config = CompileConfig::default();
+let output = compile(&config)?;
 
-// First, compile the project to get the results.
-let output = compile(&config).expect("Compilation failed");
-
-// Next, configure how and where to save the artifacts.
-let save_options = ArtifactWriterOptions {
-    output_dir: PathBuf::from("./out"),
-    create_archive: true, // Also create a source archive for verification.
+// Save all artifacts to disk
+let options = ArtifactWriterOptions {
+    output_dir: "./out".into(),
+    create_archive: true,
     ..Default::default()
 };
 
-// Finally, save the artifacts to disk.
-let saved_paths = save_artifacts(&output.result, &save_options, &config.artifacts)
-    .expect("Failed to save artifacts");
+let saved = save_artifacts(&output.result, &options, &config.artifacts)?;
+println!("Artifacts saved to: {}", saved.output_dir.display());
+```
 
-println!("✅ All artifacts saved to: {}", saved_paths.output_dir.display());
-println!("  - rWASM: {}", saved_paths.rwasm_path.display());
-if let Some(metadata_path) = saved_paths.metadata_path {
-    println!("  - Metadata: {}", metadata_path.display());
-}
-if let Some(archive_path) = saved_paths.archive_path {
-    println!("  - Archive: {}", archive_path.display());
+### Contract Verification
+
+```rust
+use fluent_compiler::{
+    verify::{VerifyConfigBuilder, verify_contract},
+    blockchain::NetworkConfig,
+};
+
+// Build verification config
+let config = VerifyConfigBuilder::new()
+    .project_root("./my-contract".into())
+    .deployed_bytecode_hash("0xabcd...".to_string())
+    .with_metadata("0x1234...".to_string(), 20993)
+    .build()?;
+
+// Run verification
+let result = verify_contract(config)?;
+
+if result.status.is_success() {
+    println!("✅ Contract verified!");
+} else {
+    println!("❌ Verification failed: {:?}", result.details.error_message);
 }
 ```
 
-## Core Configuration
+### Blockchain Integration
 
-The compilation process is primarily controlled by the `CompileConfig` struct. You can create one using `CompileConfig::default()` and then customize its fields to fit your needs. It contains nested structs like `WasmConfig` and `ArtifactsConfig` to manage specific aspects of the build.
+With the `ethers` feature enabled:
 
 ```rust
-use fluent_compiler::{BuildProfile, config::{WasmConfig, RwasmConfig, ArtifactsConfig}};
-use std::path::PathBuf;
+use fluent_compiler::blockchain::{NetworkConfig, ethers::fetch_bytecode_hash};
 
-// Key fields in fluent_compiler::CompileConfig
+// Fetch deployed contract bytecode hash
+let network = NetworkConfig::fluent_dev();
+let hash = fetch_bytecode_hash(&network, "0x1234...").await?;
+println!("Deployed bytecode hash: {}", hash);
+```
+
+## Configuration
+
+### CompileConfig
+
+The main configuration struct with builder pattern support:
+
+```rust
 pub struct CompileConfig {
-    /// Path to the Rust contract project root.
+    /// Project root directory
     pub project_root: PathBuf,
-    /// Base directory for all generated artifacts.
+    /// Output directory for artifacts
     pub output_dir: PathBuf,
-    /// WASM compilation settings (profile, features, etc.).
-    pub wasm: WasmConfig,
-    /// rWASM conversion settings.
-    pub rwasm: RwasmConfig,
-    /// Artifact generation settings (ABI, interface, etc.).
+    /// Build profile (Debug/Release/Custom)
+    pub profile: BuildProfile,
+    /// Features to enable
+    pub features: Vec<String>,
+    /// Disable default features
+    pub no_default_features: bool,
+    /// Use --locked flag
+    pub locked: bool,
+    /// Artifact generation settings
     pub artifacts: ArtifactsConfig,
 }
 ```
+
+### Builder Methods
+
+- `.project_root(path)` - Set project directory
+- `.output_dir(path)` - Set output directory
+- `.profile(name)` - Set build profile ("debug"/"release"/custom)
+- `.features(vec)` - Set features to enable
+- `.no_default_features(bool)` - Disable default features
+- `.locked(bool)` - Use locked dependencies
+- `.no_artifacts()` - Disable all artifact generation
+- `.abi_only()` - Generate only ABI (useful for verification)
+
+## Output Structure
+
+Compilation produces:
+
+```
+out/
+└── my-contract.wasm/
+    ├── lib.wasm         # WASM bytecode
+    ├── lib.rwasm        # rWASM bytecode  
+    ├── abi.json         # Solidity ABI
+    ├── interface.sol    # Solidity interface
+    ├── metadata.json    # Build metadata
+    └── sources.tar.gz   # Source archive (optional)
+```
+
+## Compilation Result
+
+```rust
+pub struct CompilationResult {
+    /// Contract info from Cargo.toml
+    pub contract_info: ContractInfo,
+    /// Compiled bytecodes
+    pub outputs: CompilationOutputs,
+    /// Generated artifacts
+    pub artifacts: ContractArtifacts,
+    /// Build metadata
+    pub build_metadata: BuildMetadata,
+}
+
+// Helper methods
+result.rwasm_hash() // SHA256 hash of rWASM
+result.wasm_hash()  // SHA256 hash of WASM
+```
+
+## Error Handling
+
+The library uses `eyre::Result` with contextual error messages:
+
+```rust
+compile(&config)
+    .context("Failed to compile contract")?;
+```
+
+Common error types:
+
+- `Not a Fluent contract` - Missing fluentbase-sdk dependency
+- `Compilation failed` - Cargo build errors
+- `Invalid configuration` - Project root or Cargo.toml issues
+
+## Requirements
+
+- Rust toolchain with `wasm32-unknown-unknown` target
+- Contract must depend on `fluentbase-sdk`
+
+## Examples
+
+See the [examples directory](examples/) for more detailed usage examples.

@@ -1,9 +1,8 @@
 //! Contract verification functionality
 
-use crate::{compile, config::CompileConfig, CompilationResult};
+use crate::{compile, CompilationResult, CompileConfig};
 use eyre::Result;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 /// Configuration for contract verification
@@ -15,8 +14,8 @@ pub struct VerifyConfig {
     /// Deployed rWASM bytecode hash to verify against
     pub deployed_bytecode_hash: String,
 
-    /// Optional compilation config override
-    pub compile_config_override: Option<CompileConfigOverride>,
+    /// Optional compilation settings override
+    pub compile_settings: Option<CompileSettings>,
 
     /// Optional metadata for the verification
     pub metadata: Option<VerificationMetadata>,
@@ -38,29 +37,17 @@ pub struct VerificationMetadata {
     pub block_number: Option<u64>,
 }
 
-/// Override specific compilation settings for verification
+/// Simplified compilation settings for verification
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompileConfigOverride {
-    /// Rust compiler version
-    pub rustc_version: Option<String>,
-
-    /// SDK version
-    pub sdk_version: Option<String>,
-
+pub struct CompileSettings {
     /// Build profile
-    pub profile: Option<String>,
+    pub profile: String,
 
     /// Features to enable
-    pub features: Option<Vec<String>>,
+    pub features: Vec<String>,
 
     /// Whether to disable default features
-    pub no_default_features: Option<bool>,
-
-    /// Additional cargo flags
-    pub cargo_flags: Option<Vec<String>>,
-
-    /// RUSTFLAGS override
-    pub rustflags: Option<String>,
+    pub no_default_features: bool,
 }
 
 /// Result of contract verification
@@ -102,7 +89,7 @@ impl VerificationStatus {
 /// Detailed verification information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationDetails {
-    /// Expected bytecode hash (from deployment)
+    /// Expected rwasm hash (from deployment)
     pub expected_hash: String,
 
     /// Actual bytecode hash (from compilation)
@@ -127,25 +114,6 @@ pub struct VerificationDetails {
     pub timestamp: u64,
 }
 
-/// Error type for verification failures
-#[derive(Debug, thiserror::Error)]
-pub enum VerificationError {
-    #[error("Bytecode mismatch: expected {expected}, got {actual}")]
-    BytecodeMismatch { expected: String, actual: String },
-
-    #[error("Compilation failed: {0}")]
-    CompilationError(String),
-
-    #[error("Invalid configuration: {0}")]
-    InvalidConfig(String),
-
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-
-    #[error("Other error: {0}")]
-    Other(#[from] eyre::Error),
-}
-
 /// Verify a deployed contract against source code
 pub fn verify_contract(config: VerifyConfig) -> Result<VerificationResult> {
     let start_time = std::time::Instant::now();
@@ -162,7 +130,7 @@ pub fn verify_contract(config: VerifyConfig) -> Result<VerificationResult> {
                 status: VerificationStatus::InvalidConfig,
                 contract_name: String::new(),
                 details: VerificationDetails {
-                    expected_hash: config.deployed_bytecode_hash.clone(),
+                    expected_hash: normalize_hash(&config.deployed_bytecode_hash),
                     actual_hash: None,
                     compiler_version: None,
                     sdk_version: None,
@@ -177,14 +145,14 @@ pub fn verify_contract(config: VerifyConfig) -> Result<VerificationResult> {
     };
 
     // Compile the contract
-    let compilation_result = match compile(&compile_config) {
+    let compilation_output = match compile(&compile_config) {
         Ok(output) => output,
         Err(e) => {
             return Ok(VerificationResult {
                 status: VerificationStatus::CompilationFailed,
                 contract_name: String::new(),
                 details: VerificationDetails {
-                    expected_hash: config.deployed_bytecode_hash.clone(),
+                    expected_hash: normalize_hash(&config.deployed_bytecode_hash),
                     actual_hash: None,
                     compiler_version: None,
                     sdk_version: None,
@@ -198,12 +166,11 @@ pub fn verify_contract(config: VerifyConfig) -> Result<VerificationResult> {
         }
     };
 
-    // Calculate hash of compiled rWASM bytecode
-    let compiled_hash = calculate_bytecode_hash(&compilation_result.result.outputs.rwasm);
+    let compilation_result = compilation_output.result;
 
     // Compare hashes
     let expected_hash = normalize_hash(&config.deployed_bytecode_hash);
-    let actual_hash = normalize_hash(&compiled_hash);
+    let actual_hash = normalize_hash(&compilation_result.rwasm_hash());
 
     let (status, error_message) = if expected_hash == actual_hash {
         (VerificationStatus::Success, None)
@@ -219,79 +186,36 @@ pub fn verify_contract(config: VerifyConfig) -> Result<VerificationResult> {
 
     Ok(VerificationResult {
         status,
-        contract_name: compilation_result.result.contract_info.name.clone(),
+        contract_name: compilation_result.contract_info.name.clone(),
         details: VerificationDetails {
             expected_hash,
             actual_hash: Some(actual_hash),
-            compiler_version: Some(
-                compilation_result
-                    .result
-                    .build_metadata
-                    .rustc_version
-                    .clone(),
-            ),
-            sdk_version: compilation_result.result.contract_info.sdk_version.clone(),
-            build_profile: Some(
-                compilation_result
-                    .result
-                    .build_metadata
-                    .settings
-                    .profile
-                    .clone(),
-            ),
+            compiler_version: Some(compilation_result.build_metadata.rustc_version.clone()),
+            sdk_version: compilation_result.contract_info.sdk_version.clone(),
+            build_profile: Some(compilation_result.build_metadata.profile.clone()),
             error_message,
             compilation_duration_ms: Some(start_time.elapsed().as_millis() as u64),
             timestamp,
         },
-        compilation_result: Some(compilation_result.result),
+        compilation_result: Some(compilation_result),
     })
 }
 
 /// Build compilation config from verification config
-fn build_compile_config(verify_config: &VerifyConfig) -> Result<CompileConfig> {
-    let mut config = CompileConfig::default();
-    config.project_root = verify_config.project_root.clone();
+pub fn build_compile_config(verify_config: &VerifyConfig) -> Result<CompileConfig> {
+    let mut builder = CompileConfig::builder()
+        .project_root(verify_config.project_root.clone())
+        .abi_only(); // Only need ABI for verification
 
     // Apply overrides if provided
-    if let Some(override_cfg) = &verify_config.compile_config_override {
-        if let Some(profile) = &override_cfg.profile {
-            config.wasm.profile = match profile.as_str() {
-                "debug" => crate::config::BuildProfile::Debug,
-                "release" => crate::config::BuildProfile::Release,
-                custom => crate::config::BuildProfile::Custom(custom.to_string()),
-            };
-        }
-
-        if let Some(features) = &override_cfg.features {
-            config.wasm.features = features.clone();
-        }
-
-        if let Some(no_default) = override_cfg.no_default_features {
-            config.wasm.no_default_features = no_default;
-        }
-
-        if let Some(cargo_flags) = &override_cfg.cargo_flags {
-            config.wasm.cargo_flags = cargo_flags.clone();
-        }
-
-        if let Some(rustflags) = &override_cfg.rustflags {
-            config.wasm.rustflags = Some(rustflags.clone());
-        }
+    if let Some(settings) = &verify_config.compile_settings {
+        builder = builder
+            .profile(&settings.profile)
+            .features(settings.features.clone())
+            .no_default_features(settings.no_default_features);
     }
 
-    // Disable artifact generation for verification
-    config.artifacts.generate_interface = false;
-    config.artifacts.generate_metadata = false;
-    config.artifacts.generate_abi = true;
-
-    config.validate()?;
-    Ok(config)
-}
-
-/// Calculate SHA256 hash of bytecode
-pub fn calculate_bytecode_hash(bytecode: &[u8]) -> String {
-    let hash = Sha256::digest(bytecode);
-    format!("{:x}", hash)
+    builder.build()
 }
 
 /// Normalize hash format (remove 0x prefix, lowercase)
@@ -306,7 +230,7 @@ pub fn normalize_hash(hash: &str) -> String {
 pub struct VerifyConfigBuilder {
     project_root: Option<PathBuf>,
     deployed_bytecode_hash: Option<String>,
-    compile_config_override: Option<CompileConfigOverride>,
+    compile_settings: Option<CompileSettings>,
     metadata: Option<VerificationMetadata>,
 }
 
@@ -315,7 +239,7 @@ impl VerifyConfigBuilder {
         Self {
             project_root: None,
             deployed_bytecode_hash: None,
-            compile_config_override: None,
+            compile_settings: None,
             metadata: None,
         }
     }
@@ -356,8 +280,17 @@ impl VerifyConfigBuilder {
         self
     }
 
-    pub fn with_compile_override(mut self, overrides: CompileConfigOverride) -> Self {
-        self.compile_config_override = Some(overrides);
+    pub fn with_compile_settings(
+        mut self,
+        profile: &str,
+        features: Vec<String>,
+        no_default_features: bool,
+    ) -> Self {
+        self.compile_settings = Some(CompileSettings {
+            profile: profile.to_string(),
+            features,
+            no_default_features,
+        });
         self
     }
 
@@ -369,9 +302,15 @@ impl VerifyConfigBuilder {
             deployed_bytecode_hash: self
                 .deployed_bytecode_hash
                 .ok_or_else(|| eyre::eyre!("deployed_bytecode_hash is required"))?,
-            compile_config_override: self.compile_config_override,
+            compile_settings: self.compile_settings,
             metadata: self.metadata,
         })
+    }
+}
+
+impl Default for VerifyConfigBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -384,14 +323,6 @@ mod tests {
         assert_eq!(normalize_hash("0xABCDEF123456"), "abcdef123456");
         assert_eq!(normalize_hash("abcdef123456"), "abcdef123456");
         assert_eq!(normalize_hash("  0xABCDEF123456  "), "abcdef123456");
-    }
-
-    #[test]
-    fn test_calculate_bytecode_hash() {
-        let bytecode = b"test bytecode";
-        let hash = calculate_bytecode_hash(bytecode);
-        assert_eq!(hash.len(), 64); // SHA256 produces 64 hex chars
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

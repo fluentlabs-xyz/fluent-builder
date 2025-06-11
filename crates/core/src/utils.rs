@@ -1,10 +1,5 @@
 //! Utility functions for WASM compilation
 
-/// Converts WASM bytecode to hex string with 0x prefix
-pub fn bytes_to_hex(bytecode: &[u8]) -> String {
-    format!("0x{}", hex::encode(bytecode))
-}
-
 /// Gets the Rust compiler version
 pub fn get_rust_version() -> String {
     // Try runtime detection first

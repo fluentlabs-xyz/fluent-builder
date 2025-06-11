@@ -22,6 +22,8 @@ pub struct ArtifactWriterOptions {
     pub archive_format: ArchiveFormat,
     /// Whether to respect .gitignore when creating archive
     pub archive_respect_gitignore: bool,
+    /// Project root directory (for archive creation)
+    pub project_root: Option<PathBuf>,
 }
 
 impl Default for ArtifactWriterOptions {
@@ -32,6 +34,7 @@ impl Default for ArtifactWriterOptions {
             create_archive: false,
             archive_format: ArchiveFormat::TarGz,
             archive_respect_gitignore: true,
+            project_root: None,
         }
     }
 }
@@ -162,23 +165,16 @@ pub fn save_artifacts(
             respect_gitignore: options.archive_respect_gitignore,
         };
 
-        // Get project root from the compilation result
-        let project_root = result
-            .build_metadata
-            .settings
-            .target
-            .split('-')
-            .next()
-            .map(|_| PathBuf::from("."))
+        // Get project root from options or use current directory
+        let project_root = options
+            .project_root
+            .as_ref()
+            .cloned()
             .unwrap_or_else(|| PathBuf::from("."));
 
-        let archive_info = create_verification_archive(
-            &project_root,
-            &archive_path,
-            &archive_options,
-            Some(result),
-        )
-        .context("Failed to create source archive")?;
+        let archive_info =
+            create_verification_archive(&project_root, &archive_path, &archive_options)
+                .context("Failed to create source archive")?;
 
         info!("Created source archive: {}", archive_path.display());
 
@@ -236,4 +232,118 @@ pub fn save_abi(abi: &crate::artifacts::Abi, output_path: &Path, pretty: bool) -
         .with_context(|| format!("Failed to write ABI: {}", output_path.display()))?;
 
     Ok(())
+}
+
+/// Builder for ArtifactWriterOptions
+impl ArtifactWriterOptions {
+    /// Create a new builder with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the output directory
+    pub fn with_output_dir(mut self, dir: PathBuf) -> Self {
+        self.output_dir = dir;
+        self
+    }
+
+    /// Set whether to pretty-print JSON
+    pub fn with_pretty_json(mut self, pretty: bool) -> Self {
+        self.pretty_json = pretty;
+        self
+    }
+
+    /// Enable archive creation with specific format
+    pub fn with_archive(mut self, format: ArchiveFormat) -> Self {
+        self.create_archive = true;
+        self.archive_format = format;
+        self
+    }
+
+    /// Set the project root for archive creation
+    pub fn with_project_root(mut self, root: PathBuf) -> Self {
+        self.project_root = Some(root);
+        self
+    }
+
+    /// Set whether to respect .gitignore
+    pub fn with_gitignore(mut self, respect: bool) -> Self {
+        self.archive_respect_gitignore = respect;
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artifacts::{ContractArtifacts, Metadata};
+    use crate::compiler::{BuildMetadata, CompilationOutputs, CompilationResult, ContractInfo};
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_artifact_writer_builder() {
+        let options = ArtifactWriterOptions::builder()
+            .with_output_dir(PathBuf::from("/tmp/out"))
+            .with_pretty_json(false)
+            .with_archive(ArchiveFormat::TarGz)
+            .with_project_root(PathBuf::from("/project"))
+            .with_gitignore(false);
+
+        assert_eq!(options.output_dir, PathBuf::from("/tmp/out"));
+        assert!(!options.pretty_json);
+        assert!(options.create_archive);
+        assert_eq!(options.archive_format, ArchiveFormat::TarGz);
+        assert_eq!(options.project_root, Some(PathBuf::from("/project")));
+        assert!(!options.archive_respect_gitignore);
+    }
+
+    #[test]
+    fn test_save_artifacts_basic() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let result = CompilationResult {
+            contract_info: ContractInfo {
+                name: "test-contract".to_string(),
+                version: "0.1.0".to_string(),
+                sdk_version: Some("0.5.0".to_string()),
+            },
+            outputs: CompilationOutputs {
+                wasm: vec![1, 2, 3, 4],
+                rwasm: vec![5, 6, 7, 8],
+            },
+            artifacts: ContractArtifacts {
+                abi: vec![],
+                interface: String::new(),
+                metadata: Metadata::default(),
+            },
+            build_metadata: BuildMetadata {
+                rustc_version: "1.75.0".to_string(),
+                timestamp: 0,
+                source_hash: "abc".to_string(),
+                target: "wasm32-unknown-unknown".to_string(),
+                profile: "release".to_string(),
+                features: vec![],
+                no_default_features: false,
+            },
+        };
+
+        let options = ArtifactWriterOptions {
+            output_dir: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        let artifacts_config = ArtifactsConfig {
+            generate_abi: false,
+            generate_interface: false,
+            generate_metadata: false,
+            pretty_json: true,
+        };
+
+        let saved = save_artifacts(&result, &options, &artifacts_config).unwrap();
+
+        assert!(saved.wasm_path.exists());
+        assert!(saved.rwasm_path.exists());
+        assert_eq!(std::fs::read(&saved.wasm_path).unwrap(), vec![1, 2, 3, 4]);
+        assert_eq!(std::fs::read(&saved.rwasm_path).unwrap(), vec![5, 6, 7, 8]);
+    }
 }

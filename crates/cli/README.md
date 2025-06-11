@@ -1,86 +1,64 @@
 # fluent-compiler-cli
 
-**Purpose:** A command-line interface for compiling Rust smart contracts to WASM/rWASM bytecode for the Fluent blockchain. By default, it compiles and saves all artifacts to disk, making it ideal for development workflows while also supporting CI/CD pipelines.
+Command-line interface for compiling Rust smart contracts to WASM/rWASM bytecode for the Fluent blockchain.
 
-**Key Features:**
-• Compiles Rust contracts to both WASM and rWASM formats with full metadata generation
-• Saves all compilation artifacts by default (WASM, rWASM, ABI, interface, metadata)
-• Supports JSON-only output mode for CI/CD pipelines and automation
-• Creates source archives for reproducible builds and verification
-• Configurable via JSON files with CLI argument overrides
-
-**Basic Usage:**
+## Installation
 
 ```bash
-# Compile current directory and save all artifacts to ./out
-fluent-compiler
+cargo install fluent-compiler-cli
+```
 
-# Compile a specific project
-fluent-compiler ./my-contract
+## Basic Usage
 
-# Specify custom output directory
-fluent-compiler -o ./build
+### Compile
 
-# Output only JSON to stdout (no files saved)
-fluent-compiler --json-only
+```bash
+# Compile current directory
+fluent-compiler compile
+
+# Compile specific project
+fluent-compiler compile ./my-contract
+
+# Custom output directory
+fluent-compiler compile -o ./build
 
 # Create source archive for verification
-fluent-compiler --archive
+fluent-compiler compile --archive
 
-# Use configuration file
-fluent-compiler -c config.json
+# Output JSON (for CI/CD)
+fluent-compiler compile --json
 
-# Verbose logging
-fluent-compiler -v
+# Debug build
+fluent-compiler compile --profile debug
 
-# Quiet mode (errors only)
-fluent-compiler -q
-
-# Compact JSON output
-fluent-compiler --json-only --compact
+# With features
+fluent-compiler compile --features "feature1 feature2"
 ```
 
-**Output Modes:**
-
-1. **Default mode** (saves files):
+### Verify
 
 ```bash
-$ fluent-compiler
-✅ Successfully compiled my-contract
-📁 Output directory: out/my-contract.wasm
-📄 Created files:
-   - lib.wasm
-   - lib.rwasm
-   - abi.json
-   - interface.sol
-   - metadata.json
+# Verify deployed contract
+fluent-compiler verify \
+  --address 0x1234... \
+  --chain-id 20993 \
+  --rpc https://rpc.dev.gblend.xyz
+
+# Verify with custom settings
+fluent-compiler verify \
+  --address 0x1234... \
+  --chain-id 20993 \
+  --rpc https://rpc.dev.gblend.xyz \
+  --profile release \
+  --features "production"
+
+# JSON output
+fluent-compiler verify --address 0x1234... --chain-id 20993 --rpc https://... --json
 ```
 
-2. **JSON-only mode** (for pipelines):
+## Output Structure
 
-```bash
-$ fluent-compiler --json-only
-{
-  "contract_name": "my-contract",
-  "wasm_bytecode_hex": "0061736d01000000...",
-  "rwasm_bytecode_hex": "00525753...",
-  "abi": [...],
-  "build_metadata": {
-    "compiler": {
-      "name": "rustc",
-      "version": "rustc 1.75.0 (82e1608df 2023-12-21)"
-    },
-    "settings": {
-      "target_triple": "wasm32-unknown-unknown",
-      "profile": "release"
-    }
-  }
-}
-```
-
-**Directory Structure:**
-
-When saving artifacts (default behavior), creates:
+When compiling, creates:
 
 ```
 out/
@@ -93,54 +71,90 @@ out/
     └── sources.tar.gz   # Source archive (if --archive)
 ```
 
-**Configuration File:**
+## Common Options
 
-Create a `config.json` to customize compilation:
+- `-v, --verbose` - Enable debug logging
+- `-q, --quiet` - Suppress all output except errors
+- `--profile <PROFILE>` - Build profile (debug/release)
+- `--features <FEATURES>` - Space-separated list of features
+- `--no-default-features` - Disable default features
+
+## JSON Output
+
+For CI/CD integration, use `--json` flag:
+
+```bash
+# Compile
+fluent-compiler compile --json | jq -r '.data.rwasm_hash'
+
+# Verify
+fluent-compiler verify --json --address 0x... --chain-id 20993 --rpc https://...
+```
+
+Output format:
 
 ```json
 {
-  "project_root": "./contracts/my-contract",
-  "output_dir": "./build",
-  "wasm": {
-    "target": "wasm32-unknown-unknown",
-    "profile": "Release",
-    "features": ["production"],
-    "no_default_features": true
-  },
-  "artifacts": {
-    "generate_interface": true,
-    "generate_abi": true,
-    "generate_metadata": true,
-    "pretty_json": true
-  }
+  "status": "success",
+  "command": "compile",
+  "contract_name": "my-contract",
+  "rwasm_hash": "0x1234...",
+  "wasm_size": 12345,
+  "rwasm_size": 10000,
+  "has_abi": true
 }
 ```
 
-**CI/CD Integration:**
-
-```bash
-# Extract specific values using jq
-fluent-compiler --json-only | jq -r '.rwasm_bytecode_hex'
-
-# Validate compilation in CI
-fluent-compiler --json-only -q || exit 1
-
-# Archive sources for verification
-fluent-compiler --archive -o ./verification-bundle
-```
-
-**Error Handling:**
+## Error Handling
 
 Errors are output as JSON to stderr:
 
 ```json
 {
-  "error": "Compilation failed",
-  "details": "No fluentbase-sdk dependency found"
+  "status": "error",
+  "error_type": "compilation_failed",
+  "message": "Detailed error message"
 }
 ```
 
-**Requirements:**
+## Requirements
 
 - Rust toolchain with `wasm32-unknown-unknown` target
-- Valid Fluent contract with `fluentbase-sdk` dependency
+- Contract must have `fluentbase-sdk` dependency
+
+## Examples
+
+### Development Workflow
+
+```bash
+# Compile with debug info
+fluent-compiler compile --profile debug
+
+# Deploy contract (using other tools)
+# ...
+
+# Verify deployment
+fluent-compiler verify \
+  --address $CONTRACT_ADDRESS \
+  --chain-id 20993 \
+  --rpc https://rpc.dev.gblend.xyz
+```
+
+### CI/CD Pipeline
+
+```bash
+#!/bin/bash
+# Compile and extract hash
+HASH=$(fluent-compiler compile --json | jq -r '.data.rwasm_hash')
+
+# Deploy and verify
+if fluent-compiler verify --json \
+  --address $DEPLOYED_ADDRESS \
+  --chain-id $CHAIN_ID \
+  --rpc $RPC_URL; then
+  echo "Verification successful"
+else
+  echo "Verification failed"
+  exit 1
+fi
+```

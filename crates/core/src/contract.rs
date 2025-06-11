@@ -1,9 +1,9 @@
 //! Contract detection and metadata management
 
-// use crate::utils;
 use eyre::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use toml::Value;
 use walkdir::WalkDir;
 
 /// Information about a detected WASM contract
@@ -30,7 +30,11 @@ impl WasmContract {
 
     /// Returns the path where compiled WASM will be located
     pub fn wasm_output_path(&self, target: &str, profile: &str) -> PathBuf {
-        self.path.join("target").join(target).join(profile).join(self.wasm_filename())
+        self.path
+            .join("target")
+            .join(target)
+            .join(profile)
+            .join(self.wasm_filename())
     }
 
     /// Gets the main source file for this contract
@@ -83,7 +87,11 @@ pub fn detect_contracts(paths: &[PathBuf]) -> Result<Vec<WasmContract>> {
         }
 
         // Walk through directory tree looking for Cargo.toml files
-        for entry in WalkDir::new(base_path).follow_links(true).into_iter().filter_map(|e| e.ok()) {
+        for entry in WalkDir::new(base_path)
+            .follow_links(true)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if entry.file_name() != "Cargo.toml" {
                 continue;
             }
@@ -131,11 +139,10 @@ pub fn parse_contract_metadata(cargo_toml_path: &Path) -> Result<WasmContract> {
         .ok_or_else(|| eyre::eyre!("No dependencies section found"))?;
 
     if !deps.contains_key("fluentbase-sdk") {
-        return Err(eyre::eyre!("Not a Fluent contract (no fluentbase-sdk dependency)"));
+        return Err(eyre::eyre!(
+            "Not a Fluent contract (no fluentbase-sdk dependency)"
+        ));
     }
-
-    // Extract SDK version
-    let sdk_version = extract_dependency_version(deps.get("fluentbase-sdk"));
 
     // Extract package info
     let package = cargo_toml
@@ -149,14 +156,92 @@ pub fn parse_contract_metadata(cargo_toml_path: &Path) -> Result<WasmContract> {
         .ok_or_else(|| eyre::eyre!("No package name found"))?
         .to_string();
 
-    let version = package.get("version").and_then(|v| v.as_str()).unwrap_or("0.1.0").to_string();
+    let version = package
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.1.0")
+        .to_string();
+
+    // Get project directory
+    let project_dir = cargo_toml_path.parent().unwrap();
+
+    // Try to get SDK version from Cargo.lock first (most reliable)
+    let sdk_version = read_sdk_version_from_cargo_lock(project_dir)?.or_else(|| {
+        // Fallback to extracting from Cargo.toml if Cargo.lock doesn't exist
+        extract_dependency_version(deps.get("fluentbase-sdk"))
+    });
 
     Ok(WasmContract {
-        path: cargo_toml_path.parent().unwrap().to_path_buf(),
+        path: project_dir.to_path_buf(),
         name,
         version,
         sdk_version,
     })
+}
+
+/// Extract SDK version from Cargo.lock file
+pub fn read_sdk_version_from_cargo_lock(project_root: &Path) -> Result<Option<String>> {
+    let cargo_lock_path = project_root.join("Cargo.lock");
+
+    if !cargo_lock_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&cargo_lock_path)
+        .with_context(|| format!("Failed to read Cargo.lock at {}", cargo_lock_path.display()))?;
+
+    let lock_file: Value =
+        toml::from_str(&content).with_context(|| "Failed to parse Cargo.lock")?;
+
+    if let Some(packages) = lock_file.get("package").and_then(|p| p.as_array()) {
+        for package in packages {
+            if package.get("name").and_then(Value::as_str) == Some("fluentbase-sdk") {
+                let version = package
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let source = package
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                if source.starts_with("git+") {
+                    if let Some(commit_hash) = source.split('#').nth(1) {
+                        return Ok(Some(format!("{}-{}", version, commit_hash)));
+                    }
+                }
+                return Ok(Some(version.to_string()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Read rust toolchain version from rust-toolchain or rust-toolchain.toml
+pub fn read_rust_toolchain(project_root: &Path) -> Result<Option<String>> {
+    // Try rust-toolchain.toml first
+    let toolchain_toml = project_root.join("rust-toolchain.toml");
+    if toolchain_toml.exists() {
+        let content = std::fs::read_to_string(&toolchain_toml)?;
+        let toml: toml::Value = toml::from_str(&content)?;
+
+        if let Some(channel) = toml
+            .get("toolchain")
+            .and_then(|t| t.get("channel"))
+            .and_then(|c| c.as_str())
+        {
+            return Ok(Some(channel.to_string()));
+        }
+    }
+
+    // Try rust-toolchain file
+    let toolchain_file = project_root.join("rust-toolchain");
+    if toolchain_file.exists() {
+        let content = std::fs::read_to_string(&toolchain_file)?;
+        return Ok(Some(content.trim().to_string()));
+    }
+
+    Ok(None)
 }
 
 /// Gets the main source file for a contract
@@ -187,7 +272,10 @@ fn extract_dependency_version(dep_value: Option<&toml::Value>) -> Option<String>
 pub fn validate_contract(contract: &WasmContract) -> Result<()> {
     // Check that contract directory exists
     if !contract.path.exists() {
-        return Err(eyre::eyre!("Contract directory does not exist: {}", contract.path.display()));
+        return Err(eyre::eyre!(
+            "Contract directory does not exist: {}",
+            contract.path.display()
+        ));
     }
 
     // Check that Cargo.toml exists
@@ -202,7 +290,10 @@ pub fn validate_contract(contract: &WasmContract) -> Result<()> {
     // Check that source file exists
     let main_source = contract.main_source_file()?;
     if !main_source.exists() {
-        return Err(eyre::eyre!("Main source file not found: {}", main_source.display()));
+        return Err(eyre::eyre!(
+            "Main source file not found: {}",
+            main_source.display()
+        ));
     }
 
     Ok(())
@@ -338,5 +429,83 @@ pub extern "C" fn deploy() {}
         };
 
         assert!(validate_contract(&invalid_contract).is_err());
+    }
+
+    #[test]
+    fn test_read_sdk_version_from_cargo_lock() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create a sample Cargo.lock
+        let cargo_lock_content = r#"
+# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 3
+
+[[package]]
+name = "fluentbase-sdk"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abcd1234"
+
+[[package]]
+name = "my-contract"
+version = "0.1.0"
+dependencies = [
+    "fluentbase-sdk",
+]
+"#;
+
+        fs::write(temp_dir.path().join("Cargo.lock"), cargo_lock_content).unwrap();
+
+        let sdk_version = read_sdk_version_from_cargo_lock(temp_dir.path()).unwrap();
+        assert_eq!(sdk_version, Some("0.5.0".to_string()));
+    }
+
+    #[test]
+    fn test_read_sdk_version_from_cargo_lock_missing() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // No Cargo.lock file
+        let sdk_version = read_sdk_version_from_cargo_lock(temp_dir.path()).unwrap();
+        assert_eq!(sdk_version, None);
+    }
+
+    #[test]
+    fn test_read_sdk_version_from_cargo_lock_no_sdk() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Cargo.lock without fluentbase-sdk
+        let cargo_lock_content = r#"
+[[package]]
+name = "some-other-package"
+version = "1.0.0"
+"#;
+
+        fs::write(temp_dir.path().join("Cargo.lock"), cargo_lock_content).unwrap();
+
+        let sdk_version = read_sdk_version_from_cargo_lock(temp_dir.path()).unwrap();
+        assert_eq!(sdk_version, None);
+    }
+
+    #[test]
+    fn test_read_rust_toolchain() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Test rust-toolchain.toml
+        let toolchain_toml = r#"
+[toolchain]
+channel = "1.75.0"
+"#;
+        fs::write(temp_dir.path().join("rust-toolchain.toml"), toolchain_toml).unwrap();
+
+        let version = read_rust_toolchain(temp_dir.path()).unwrap();
+        assert_eq!(version, Some("1.75.0".to_string()));
+
+        // Test rust-toolchain file
+        fs::remove_file(temp_dir.path().join("rust-toolchain.toml")).unwrap();
+        fs::write(temp_dir.path().join("rust-toolchain"), "1.76.0\n").unwrap();
+
+        let version = read_rust_toolchain(temp_dir.path()).unwrap();
+        assert_eq!(version, Some("1.76.0".to_string()));
     }
 }

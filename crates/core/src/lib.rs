@@ -11,7 +11,7 @@ pub mod verify;
 
 pub use artifacts::{save_artifacts, Abi, ArtifactWriterOptions, Metadata, SavedArtifacts};
 pub use blockchain::{DeployedContractInfo, NetworkConfig};
-pub use compiler::{compile, CompilationResult, CompilationSettings, CompileOutput, ContractInfo};
+pub use compiler::{compile, CompilationResult, CompileOutput, ContractInfo};
 pub use config::{BuildProfile, CompileConfig};
 pub use contract::WasmContract;
 pub use verify::{
