@@ -168,12 +168,28 @@ pub fn get_project_path_in_repo(project_root: &Path) -> Result<String> {
 
     let git_root = PathBuf::from(String::from_utf8(output.stdout)?.trim());
 
+    // Make both paths absolute for reliable comparison
+    let abs_project_root = project_root
+        .canonicalize()
+        .context("Failed to canonicalize project root")?;
+    let abs_git_root = git_root
+        .canonicalize()
+        .context("Failed to canonicalize git root")?;
+
     // Calculate relative path
-    let relative_path = project_root
-        .strip_prefix(&git_root)
+    let relative_path = abs_project_root
+        .strip_prefix(&abs_git_root)
         .context("Project is not inside git repository")?;
 
-    Ok(relative_path.to_string_lossy().to_string())
+    // Convert to string with forward slashes
+    let path_str = relative_path.to_string_lossy().replace('\\', "/");
+
+    // Return "." if empty, otherwise return the path
+    Ok(if path_str.is_empty() {
+        ".".to_string()
+    } else {
+        path_str
+    })
 }
 
 #[cfg(test)]
