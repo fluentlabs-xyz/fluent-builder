@@ -41,7 +41,6 @@ clean:
 
 
 # --- Compilation ---
-
 # Compile a contract. Accepts an optional contract name and extra flags for the CLI.
 # Usage:
 #   just compile                              # Compile default contract
@@ -65,10 +64,9 @@ compile *args: link
       fi
     done
 
-    echo "📦 Compiling '$CONTRACT' with flags: ${EXTRA_ARGS[@]}"
-    # The quotes around ${EXTRA_ARGS[@]} are crucial to handle arguments correctly.
-    ./fluent-compiler compile "examples/$CONTRACT" "${EXTRA_ARGS[@]}"
-
+    # The ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} syntax safely handles an empty array with `set -u`
+    echo "📦 Compiling '$CONTRACT' with flags: ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
+    ./fluent-compiler compile "examples/$CONTRACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 # --- Verification & Deployment ---
 
