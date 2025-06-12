@@ -35,8 +35,9 @@ convert_case = "0.8.0"
 walkdir = "2"
 
 # SDK integration
-fluentbase-sdk-derive-core = { path = "../fluentbase/crates/sdk-derive/derive-core" }
-fluentbase-types = { path = "../fluentbase/crates/types" }
+fluentbase-sdk-derive-core = { git = "https://github.com/fluentlabs-xyz/fluentbase", rev = "19610a941d8c3574132ac16926b7362bc72631ab", package = "fluentbase-sdk-derive-core" }
+fluentbase-types = { git = "https://github.com/fluentlabs-xyz/fluentbase", rev = "19610a941d8c3574132ac16926b7362bc72631ab", package = "fluentbase-types" }
+
 
 # Rust parsing
 proc-macro2 = "1.0"
