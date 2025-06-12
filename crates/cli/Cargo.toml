@@ -1,20 +1,20 @@
 [package]
-name = "fluent-compiler-cli"
+name = "fluent-builder-cli"
 description = "Command-line interface for compiling Rust smart contracts to WASM/rWASM for the Fluent blockchain"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/fluentlabs-xyz/fluent-compiler-suite"
+repository = "https://github.com/fluentlabs-xyz/fluent-builder"
 keywords = ["fluent", "wasm", "rwasm", "compiler", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
-name = "fluent-compiler"
+name = "fluent-builder"
 path = "src/main.rs"
 
 [dependencies]
 # Core compiler library
-fluent-compiler = { path = "../core" }
+fluent-builder = { path = "../core" }
 
 # CLI framework
 clap = { version = "4", features = ["derive"] }

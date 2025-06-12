@@ -9,12 +9,12 @@ default:
 
 # Build the CLI in release mode
 build:
-    cargo build --release -p fluent-compiler-cli
+    cargo build --release -p fluent-builder-cli
 
 # Link the release binary to the project root for easy local use
 link: build
-    @rm -f fluent-compiler
-    @ln -s target/release/fluent-compiler fluent-compiler
+    @rm -f fluent-builder
+    @ln -s target/release/fluent-builder fluent-builder
 
 # Install the CLI globally
 install:
@@ -35,7 +35,7 @@ clippy:
 # Clean build artifacts and generated outputs
 clean:
     cargo clean
-    rm -f fluent-compiler
+    rm -f fluent-builder
     find examples -type d -name "out" -exec rm -rf {} + 2>/dev/null || true
     find examples -type d -name "target" -exec rm -rf {} + 2>/dev/null || true
 
@@ -66,7 +66,7 @@ compile *args: link
 
     # The ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} syntax safely handles an empty array with `set -u`
     echo "📦 Compiling '$CONTRACT' with flags: ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}"
-    ./fluent-compiler compile "examples/$CONTRACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
+    ./fluent-builder compile "examples/$CONTRACT" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
 
 # --- Verification & Deployment ---
 
@@ -80,7 +80,7 @@ verify-contract contract address: link
     RPC_URL="${RPC_URL:-https://rpc.dev.gblend.xyz}"
     
     echo "🔍 Verifying '{{contract}}' at address {{address}} on chain $CHAIN_ID..."
-    ./fluent-compiler verify examples/{{contract}} \
+    ./fluent-builder verify examples/{{contract}} \
         --address {{address}} \
         --chain-id "$CHAIN_ID" \
         --rpc "$RPC_URL"

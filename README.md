@@ -1,6 +1,6 @@
 # Fluent Compiler Suite
 
-[![Build Status](https://github.com/fluentlabs-xyz/fluent-compiler/actions/workflows/ci.yml/badge.svg)](https://github.com/fluentlabs-xyz/fluent-compiler/actions)
+[![Build Status](https://github.com/fluentlabs-xyz/fluent-builder/actions/workflows/ci.yml/badge.svg)](https://github.com/fluentlabs-xyz/fluent-builder/actions)
 
 A Rust library and command-line interface (CLI) for compiling and verifying Rust smart contracts for the Fluent blockchain.
 
@@ -27,8 +27,8 @@ This guide will walk you through compiling, deploying, and verifying an example 
 1. **Clone the Repository**
 
     ```bash
-    git clone https://github.com/fluentlabs-xyz/fluent-compiler.git
-    cd fluent-compiler
+    git clone https://github.com/fluentlabs-xyz/fluent-builder.git
+    cd fluent-builder
     ```
 
 2. **Install Rust WASM Target**
@@ -45,7 +45,7 @@ This guide will walk you through compiling, deploying, and verifying an example 
     ```
 
     This command automates the entire process:
-    - Builds the `fluent-compiler` CLI.
+    - Builds the `fluent-builder` CLI.
     - Compiles the example contract.
     - Deploys it to the Fluent testnet using `gblend`.
     - Verifies that the deployed bytecode matches the local source code.
@@ -56,7 +56,7 @@ You have just completed a full, verifiable deployment!
 
 ## CLI Usage
 
-The `fluent-compiler` binary is the primary way to interact with the toolkit.
+The `fluent-builder` binary is the primary way to interact with the toolkit.
 
 ### `compile`
 
@@ -68,7 +68,7 @@ This is the **default and recommended** mode for official builds. It requires yo
 
 ```bash
 # Fails if the repository has uncommitted changes
-fluent-compiler compile ./path/to/my-contract
+fluent-builder compile ./path/to/my-contract
 ```
 
 #### 2. Archive Source (Fallback Mode)
@@ -77,7 +77,7 @@ Use the `--allow-dirty` flag to bypass the Git check. This is ideal for local de
 
 ```bash
 # Compiles even with uncommitted changes
-fluent-compiler compile ./path/to/my-contract --allow-dirty
+fluent-builder compile ./path/to/my-contract --allow-dirty
 ```
 
 ### `verify`
@@ -85,7 +85,7 @@ fluent-compiler compile ./path/to/my-contract --allow-dirty
 The `verify` command checks if a deployed contract matches your local source code.
 
 ```bash
-fluent-compiler verify ./path/to/my-contract \
+fluent-builder verify ./path/to/my-contract \
   --address 0x1234... \
   --chain-id 20993 \
   --rpc https://rpc.dev.gblend.xyz
@@ -99,8 +99,8 @@ We use `just` to automate common development tasks.
 
 | Command | Description |
 | :--- | :--- |
-| `just compile` | Builds the `fluent-compiler` CLI binary. |
-| `just link` | Builds the CLI and creates a symlink (`./fluent-compiler`) for easy local use. |
+| `just compile` | Builds the `fluent-builder` CLI binary. |
+| `just link` | Builds the CLI and creates a symlink (`./fluent-builder`) for easy local use. |
 | `just compile-examples` | Compiles an example contract. Pass flags like `just compile-examples --allow-dirty`. |
 | `just deploy-and-verify` | **(Most useful command)** Runs the full compile, deploy, and verify workflow. |
 | `just test` | Runs all tests in the workspace. |

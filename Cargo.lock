@@ -1824,7 +1824,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluent-compiler"
+name = "fluent-builder"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -1854,14 +1854,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "fluent-compiler-cli"
+name = "fluent-builder-cli"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
  "ethers",
  "eyre",
- "fluent-compiler",
+ "fluent-builder",
  "hex",
  "serde",
  "serde_json",

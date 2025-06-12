@@ -1,10 +1,10 @@
 [package]
-name = "fluent-compiler"
+name = "fluent-builder"
 description = "Core library for compiling Rust smart contracts to WASM/rWASM bytecode with ABI generation for the Fluent blockchain"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/fluentlabs-xyz/fluent-compiler-suite"
+repository = "https://github.com/fluentlabs-xyz/fluent-builder"
 keywords = ["fluent", "wasm", "rwasm", "compiler", "blockchain"]
 categories = ["development-tools", "wasm"]
 

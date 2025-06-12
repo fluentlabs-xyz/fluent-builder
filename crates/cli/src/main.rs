@@ -1,4 +1,4 @@
-//! CLI for fluent-compiler library
+//! CLI for fluent-builder library
 //!
 //! Compiles and verifies Rust smart contracts for the Fluent blockchain.
 
@@ -8,7 +8,7 @@ use ethers::{
     types::Address,
 };
 use eyre::{Context, Result};
-use fluent_compiler::{
+use fluent_builder::{
     compile, create_verification_archive, save_artifacts, verify, ArchiveFormat, ArchiveOptions,
     CompileConfig, GitInfo, VerificationStatus,
 };
@@ -19,7 +19,7 @@ use tracing::Level;
 
 /// Fluent smart contract compiler and verifier
 #[derive(Parser, Debug)]
-#[command(name = "fluent-compiler")]
+#[command(name = "fluent-builder")]
 #[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -241,7 +241,7 @@ fn run_compile(
     json: bool,
 ) -> Result<()> {
     // Check Git status
-    let git_info = fluent_compiler::detect_git_info(&project_root)?;
+    let git_info = fluent_builder::detect_git_info(&project_root)?;
     
     // Determine source type based on git status and allow_dirty flag
     let use_git_source = match (&git_info, allow_dirty) {
@@ -321,12 +321,12 @@ fn run_compile(
             // Show source type used
             if let Some(metadata) = &result.artifacts.as_ref().map(|a| &a.metadata) {
                 match &metadata.source {
-                    fluent_compiler::Source::Git { repository, commit, .. } => {
+                    fluent_builder::Source::Git { repository, commit, .. } => {
                         println!("📦 Source: Git repository");
                         println!("   Repository: {}", repository);
                         println!("   Commit: {}", &commit[..8]);
                     }
-                    fluent_compiler::Source::Archive { .. } => {
+                    fluent_builder::Source::Archive { .. } => {
                         println!("📦 Source: Archive");
                     }
                 }
@@ -401,7 +401,7 @@ async fn run_verify(
     compile_config.use_git_source = false; // Always use archive/plain directory for verify
 
     // Run verification
-    let verify_config = fluent_compiler::VerifyConfig {
+    let verify_config = fluent_builder::VerifyConfig {
         project_root,
         deployed_bytecode_hash: deployed_hash.clone(),
         compile_config: Some(compile_config),
@@ -553,11 +553,11 @@ mod tests {
 
     #[test]
     fn test_cli_parsing() {
-        let cli = Cli::parse_from(&["fluent-compiler", "compile"]);
+        let cli = Cli::parse_from(&["fluent-builder", "compile"]);
         assert!(matches!(cli.command, Commands::Compile { .. }));
 
         let cli = Cli::parse_from(&[
-            "fluent-compiler",
+            "fluent-builder",
             "verify",
             "--address",
             "0x123",
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn test_compile_settings() {
         let cli = Cli::parse_from(&[
-            "fluent-compiler",
+            "fluent-builder",
             "compile",
             "--profile",
             "debug",
@@ -595,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_allow_dirty_flag() {
-        let cli = Cli::parse_from(&["fluent-compiler", "compile", "--allow-dirty"]);
+        let cli = Cli::parse_from(&["fluent-builder", "compile", "--allow-dirty"]);
 
         if let Commands::Compile { allow_dirty, .. } = cli.command {
             assert!(allow_dirty);

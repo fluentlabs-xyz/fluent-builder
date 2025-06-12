@@ -34,7 +34,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// # Example
 /// ```no_run
-/// use fluent_compiler::compile_at;
+/// use fluent_builder::compile_at;
 ///
 /// let result = compile_at("./my-contract").unwrap();
 /// println!("Compiled: {} v{}", result.contract.name, result.contract.version);
@@ -48,7 +48,7 @@ pub fn compile_at(project_root: impl Into<std::path::PathBuf>) -> eyre::Result<C
 ///
 /// # Example
 /// ```no_run
-/// use fluent_compiler::verify_at;
+/// use fluent_builder::verify_at;
 ///
 /// let matches = verify_at("./my-contract", "0xabc123...").unwrap();
 /// assert!(matches);

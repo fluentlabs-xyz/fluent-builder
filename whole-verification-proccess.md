@@ -2,12 +2,12 @@
 **Entities:**
 
 1. **`Foundry`**: Developer's primary tool.
-2. **`fluent-compiler` (lib)**: The core Rust compilation library (from `fluent-compiler-suite/crates/fluent-compiler`).
-3. **`fluent-compiler-cli` (cli)**: The CLI wrapper around the library, executed by the verifier (from `fluent-compiler-suite/crates/fluent-compiler-cli`).
+2. **`fluent-builder` (lib)**: The core Rust compilation library (from `fluent-builder-suite/crates/fluent-builder`).
+3. **`fluent-builder-cli` (cli)**: The CLI wrapper around the library, executed by the verifier (from `fluent-builder-suite/crates/fluent-builder-cli`).
 4. **`VerifyRequest` (proto)**: The gRPC/HTTP request to the verifier server.
 5. **`verifier-server`**: The server handling verification requests.
 6. **`verifier-logic`**: The core logic crate for the verification process.
-7. **`docker-container`**: The isolated environment for running `fluent-compiler-cli`.
+7. **`docker-container`**: The isolated environment for running `fluent-builder-cli`.
 
 **High-Level Architecture & Sequence:**
 
@@ -18,8 +18,8 @@ sequenceDiagram
     participant VerifierServer as verifier-server
     participant VerifierLogic as verifier-logic
     participant Docker as docker-container
-    participant CLI as fluent-compiler-cli
-    participant Lib as fluent-compiler (lib)
+    participant CLI as fluent-builder-cli
+    participant Lib as fluent-builder (lib)
 
     Developer->>Foundry: forge build --wasm (or similar)
     Foundry->>Lib: compile_project(LibCompileConfig_for_Foundry)
@@ -39,7 +39,7 @@ sequenceDiagram
     VerifierServer->>VerifierLogic: Process(VerifyWasmRequest_internal)
     VerifierLogic->>VerifierLogic: Prepare source code (unpack/clone to temp_dir)
     VerifierLogic->>VerifierLogic: Determine rustc version for Docker image
-    VerifierLogic->>Docker: Run fluent-compiler-cli
+    VerifierLogic->>Docker: Run fluent-builder-cli
     Note over Docker: Mounts temp_dir (source) and output_dir
     Docker->>CLI: Executes with args (manifest_path, profile, features from VerifyWasmRequest_internal.compile_settings)
     
@@ -61,14 +61,14 @@ sequenceDiagram
 
 **Key Data Structures (Rust structs, names as currently in your code or proposed):**
 
-Let's assume the names from your existing `fluent-compiler-suite` and `fluent-verifier-logic`.
+Let's assume the names from your existing `fluent-builder-suite` and `fluent-verifier-logic`.
 
-**1. Between `Foundry` and `fluent-compiler` (lib):**
+**1. Between `Foundry` and `fluent-builder` (lib):**
 
-* **Input to `fluent-compiler::compile()` (or `compile_contracts`)**:
+* **Input to `fluent-builder::compile()` (or `compile_contracts`)**:
 
     ```rust
-    // In fluent-compiler/src/config.rs
+    // In fluent-builder/src/config.rs
    pub struct CompileConfig {
     /// Project root directory
     pub project_root: PathBuf,
@@ -97,10 +97,10 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
     }
     ```
 
-* **Output from `fluent-compiler::compile()` (specifically from `CompiledContract`):**
+* **Output from `fluent-builder::compile()` (specifically from `CompiledContract`):**
 
     ```rust
-    // In fluent-compiler/src/compiler.rs
+    // In fluent-builder/src/compiler.rs
     pub struct CompiledContract { // What Foundry receives for each contract
         pub contract: WasmContract, // Contains name, version, path, sdk_version (parsed from Cargo.toml)
         pub wasm_bytecode: Vec<u8>,
@@ -109,7 +109,7 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
         pub compile_config: CompileConfig, // The config used for this specific contract
     }
 
-    // In fluent-compiler/src/artifacts/mod.rs
+    // In fluent-builder/src/artifacts/mod.rs
     // This `BuildInfo` is used to create Foundry's `artifacts.metadata.build_metadata`
     pub struct BuildInfo {
         pub rustc_version: String, // Determined by lib using utils::get_rust_version()
@@ -177,12 +177,12 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
     }
     ```
 
-**3. Between `verifier-logic` and `fluent-compiler-cli` (CLI arguments):**
+**3. Between `verifier-logic` and `fluent-builder-cli` (CLI arguments):**
 
 * The CLI arguments we defined earlier:
 
     ```rust
-    // In fluent-compiler-cli/src/main.rs (Clap struct)
+    // In fluent-builder-cli/src/main.rs (Clap struct)
     struct CliArgs {
         manifest_path: PathBuf, // e.g., /source/Cargo.toml or /source/my_contract/Cargo.toml
         profile: String,        // e.g., "release"
@@ -199,12 +199,12 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
 
     `verifier-logic` will construct these arguments based on `VerifyWasmRequest.compile_settings` and the path to the prepared source code in Docker.
 
-**4. Between `fluent-compiler-cli` and `fluent-compiler` (lib) (API call):**
+**4. Between `fluent-builder-cli` and `fluent-builder` (lib) (API call):**
 
-* **Input to `fluent-compiler::compile_for_verifier()` (library function):**
+* **Input to `fluent-builder::compile_for_verifier()` (library function):**
 
     ```rust
-    // In fluent-compiler/src/config.rs (or lib.rs)
+    // In fluent-builder/src/config.rs (or lib.rs)
     // This is LibCompileConfig from our previous discussion
     pub struct LibCompileConfig {
         pub project_path: PathBuf, // Absolute path to contract dir inside Docker
@@ -225,10 +225,10 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
     }
     ```
 
-* **Output from `fluent-compiler::compile_for_verifier()` (library function):**
+* **Output from `fluent-builder::compile_for_verifier()` (library function):**
 
     ```rust
-    // In fluent-compiler/src/lib.rs (or types.rs)
+    // In fluent-builder/src/lib.rs (or types.rs)
     // This is LibraryCompilationOutput from our previous discussion
     pub struct LibraryCompilationOutput {
         pub wasm_bytecode: Vec<u8>,
@@ -259,7 +259,7 @@ Let's assume the names from your existing `fluent-compiler-suite` and `fluent-ve
     }
     ```
 
-**5. Between `fluent-compiler-cli` (stdout) and `verifier-logic` (`docker_runner.rs`):**
+**5. Between `fluent-builder-cli` (stdout) and `verifier-logic` (`docker_runner.rs`):**
 
 * **JSON output from CLI's stdout:**
 
