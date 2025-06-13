@@ -6,7 +6,7 @@
 // Internal modules
 mod archive;
 mod artifacts;
-mod compiler;
+mod builder;
 mod config;
 mod git;
 mod parser;
@@ -15,7 +15,7 @@ mod verify;
 // Public API - only expose what's necessary
 
 // Core compilation
-pub use compiler::{compile, get_rwasm_hash, get_wasm_hash, CompilationResult, ContractInfo};
+pub use builder::{build, get_rwasm_hash, get_wasm_hash, CompilationResult, ContractInfo};
 pub use config::{ArtifactsConfig, CompileConfig};
 
 // Artifact management
@@ -39,9 +39,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// let result = compile_at("./my-contract").unwrap();
 /// println!("Compiled: {} v{}", result.contract.name, result.contract.version);
 /// ```
-pub fn compile_at(project_root: impl Into<std::path::PathBuf>) -> eyre::Result<CompilationResult> {
+pub fn build_at(project_root: impl Into<std::path::PathBuf>) -> eyre::Result<CompilationResult> {
     let config = CompileConfig::new(project_root);
-    compile(&config)
+    build(&config)
 }
 
 /// Verify a deployed contract matches the source code

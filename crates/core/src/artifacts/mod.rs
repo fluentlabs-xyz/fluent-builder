@@ -1,7 +1,7 @@
 //! Artifact generation for compiled contracts
 
 use crate::{
-    compiler::{hash_bytes, ContractInfo, RuntimeInfo},
+    builder::{hash_bytes, ContractInfo, RuntimeInfo},
     config::CompileConfig,
 };
 use eyre::{Context, Result};

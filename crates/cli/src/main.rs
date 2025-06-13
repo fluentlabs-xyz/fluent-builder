@@ -9,7 +9,7 @@ use ethers::{
 };
 use eyre::{Context, Result};
 use fluent_builder::{
-    compile, create_verification_archive, save_artifacts, verify, ArchiveFormat, ArchiveOptions,
+    build, create_verification_archive, save_artifacts, verify, ArchiveFormat, ArchiveOptions,
     CompileConfig, GitInfo, VerificationStatus,
 };
 use serde::Serialize;
@@ -274,7 +274,7 @@ fn run_compile(
     config.no_default_features = no_default_features;
     config.use_git_source = use_git_source;
 
-    let result = compile(&config).context("Compilation failed")?;
+    let result = build(&config).context("Compilation failed")?;
 
     let rwasm_hash = format!("{:x}", Sha256::digest(&result.outputs.rwasm));
 

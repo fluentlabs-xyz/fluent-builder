@@ -1,6 +1,6 @@
 //! Contract verification functionality
 
-use crate::{compile, CompilationResult, CompileConfig};
+use crate::{build, CompilationResult, CompileConfig};
 use eyre::Result;
 use std::path::PathBuf;
 
@@ -56,7 +56,7 @@ pub fn verify(config: VerifyConfig) -> Result<VerificationResult> {
         .unwrap_or_else(|| CompileConfig::new(config.project_root.clone()));
 
     // Compile the contract
-    let compilation_result = match compile(&compile_config) {
+    let compilation_result = match build(&compile_config) {
         Ok(result) => result,
         Err(e) => {
             return Ok(VerificationResult {
@@ -98,7 +98,7 @@ pub fn normalize_hash(hash: &str) -> String {
 
 /// Get rWASM hash from compilation result
 fn get_rwasm_hash(result: &CompilationResult) -> String {
-    crate::compiler::hash_bytes(&result.outputs.rwasm)
+    crate::builder::hash_bytes(&result.outputs.rwasm)
 }
 
 #[cfg(test)]

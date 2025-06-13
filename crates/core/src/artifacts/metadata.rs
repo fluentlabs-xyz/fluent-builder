@@ -3,7 +3,7 @@
 //! CRITICAL: The JSON schema produced by these structures is a contract
 //! with external systems and must not be changed.
 
-use crate::compiler::{ContractInfo, RustInfo, SdkInfo};
+use crate::builder::{ContractInfo, RustInfo, SdkInfo};
 use crate::config::CompileConfig;
 use crate::GitInfo;
 use eyre::Result;
