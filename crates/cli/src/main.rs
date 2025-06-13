@@ -2,6 +2,8 @@
 //!
 //! Compiles and verifies Rust smart contracts for the Fluent blockchain.
 
+mod docker;
+
 use clap::{Parser, Subcommand};
 use ethers::{
     providers::{Http, Middleware, Provider},
@@ -9,7 +11,7 @@ use ethers::{
 };
 use eyre::{Context, Result};
 use fluent_builder::{
-    build, create_verification_archive, save_artifacts, verify, ArchiveFormat, ArchiveOptions,
+    build, create_verification_archive, save_artifacts, verify, ArchiveOptions,
     CompileConfig, GitInfo, VerificationStatus,
 };
 use serde::Serialize;
@@ -62,6 +64,10 @@ enum Commands {
         #[arg(long)]
         allow_dirty: bool,
 
+        /// Do not use Docker for compilation (faster but less reproducible)
+        #[arg(long)]
+        no_docker: bool,
+
         /// Output JSON to stdout
         #[arg(long)]
         json: bool,
@@ -100,6 +106,22 @@ enum Commands {
         /// Output JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Docker-related utilities
+    Docker {
+        #[command(subcommand)]
+        command: DockerCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DockerCommands {
+    /// Clean up old Docker images
+    Clean {
+        /// Number of recent images to keep
+        #[arg(long, default_value = "5")]
+        keep: usize,
     },
 }
 
@@ -191,6 +213,7 @@ fn main() {
             features,
             no_default_features,
             allow_dirty,
+            no_docker,
             json,
         } => run_compile(
             project_root,
@@ -199,6 +222,7 @@ fn main() {
             features,
             no_default_features,
             allow_dirty,
+            no_docker,
             json,
         ),
         Commands::Verify {
@@ -223,12 +247,29 @@ fn main() {
                 json,
             ))
         }
+        Commands::Docker { command } => match command {
+            DockerCommands::Clean { keep } => docker::cleanup_old_images(keep),
+        },
     };
 
     if let Err(e) = result {
         output_error(e);
         std::process::exit(1);
     }
+}
+
+/// Early version detection for both Docker and local compilation
+fn detect_project_versions(project_root: &PathBuf) -> Result<(String, String)> {
+    // Read Rust version using existing function from builder
+    let rust_version = fluent_builder::read_rust_toolchain_version(project_root)?;
+    
+    // Read SDK version using existing function from builder
+    let sdk_version = fluent_builder::read_sdk_version_from_cargo_lock(project_root)?;
+    
+    tracing::info!("Detected Rust version: '{}'", rust_version);
+    tracing::info!("Detected SDK version: '{}'", sdk_version);
+    
+    Ok((rust_version, sdk_version))
 }
 
 fn run_compile(
@@ -238,142 +279,203 @@ fn run_compile(
     features: Vec<String>,
     no_default_features: bool,
     allow_dirty: bool,
+    no_docker: bool,
     json: bool,
 ) -> Result<()> {
-    // Check Git status
-    let git_info = fluent_builder::detect_git_info(&project_root)?;
+    // Resolve project root to absolute path first
+    let project_root = project_root
+        .canonicalize()
+        .context("Failed to resolve project path")?;
     
-    // Determine source type based on git status and allow_dirty flag
-    let use_git_source = match (&git_info, allow_dirty) {
-        (None, false) => {
-            return Err(eyre::eyre!(
-                "Project is not in a Git repository.\n\
-                 Initialize a Git repository or use --allow-dirty flag to compile with archive source."
-            ));
-        }
-        (Some(git), false) if git.is_dirty => {
-            return Err(eyre::eyre!(
-                "Repository has {} uncommitted changes.\n\
-                 \n\
-                 To fix this:\n\
-                 1. Commit your changes: git add . && git commit -m \"Your message\"\n\
-                 2. Or stash them: git stash\n\
-                 3. Or use --allow-dirty flag to compile with archive source",
-                git.dirty_files_count
-            ));
-        }
-        (_, true) => false, // --allow-dirty always uses archive source
-        _ => true, // Clean git repo, use git source
-    };
+    // Early version detection - fail fast if prerequisites missing
+    let (rust_version, sdk_version) = detect_project_versions(&project_root)?;
+    
+    tracing::info!("Detected Rust version: {}", rust_version);
+    tracing::info!("Detected SDK version: {}", sdk_version);
 
-    // Build configuration
+    // If Docker is requested (default), run in container and exit
+    if !no_docker {
+        if !json {
+            println!("🐳 Running compilation in Docker for reproducible builds...");
+            println!("   (Use --no-docker for faster local compilation)");
+            
+            // Warn about non-reproducible nightly
+            if rust_version == "nightly" {
+                println!("⚠️  Warning: Using 'nightly' without a specific date may not be reproducible");
+                println!("   Consider using 'nightly-YYYY-MM-DD' in rust-toolchain.toml");
+            }
+        }
+        
+        // Pass all CLI arguments to Docker along with detected versions
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        return docker::run_reproducible(&project_root, &rust_version, &sdk_version, &args);
+    }
+
+    // --- Local compilation starts here ---
+    
+    // Create compilation config
     let mut config = CompileConfig::new(project_root);
     config.output_dir = output_dir;
     config.profile = profile;
     config.features = features;
     config.no_default_features = no_default_features;
-    config.use_git_source = use_git_source;
 
+    // Check Git repository status
+    let git_info = fluent_builder::detect_git_info(&config.project_root)?;
+    
+    // Validate Git state unless --allow-dirty is specified
+    if !allow_dirty {
+        match &git_info {
+            None => {
+                return Err(eyre::eyre!(
+                    "Project is not in a Git repository.\n\
+                     Initialize a Git repository or use --allow-dirty flag."
+                ));
+            }
+            Some(git) if git.is_dirty => {
+                return Err(eyre::eyre!(
+                    "Repository has {} uncommitted changes.\n\
+                     \n\
+                     To fix this:\n\
+                     1. Commit your changes: git add . && git commit -m \"Your message\"\n\
+                     2. Or stash them: git stash\n\
+                     3. Or use --allow-dirty flag",
+                    git.dirty_files_count
+                ));
+            }
+            _ => {} // Clean repository, continue
+        }
+    }
+
+    // Determine source type for metadata
+    // - Clean Git repo → use Git source
+    // - Dirty repo or --allow-dirty → use archive source
+    config.use_git_source = match (&git_info, allow_dirty) {
+        (Some(git), false) if !git.is_dirty => true,
+        _ => false,
+    };
+
+    // Perform compilation
     let result = build(&config).context("Compilation failed")?;
+    let rwasm_hash = format!("0x{:x}", Sha256::digest(&result.outputs.rwasm));
 
-    let rwasm_hash = format!("{:x}", Sha256::digest(&result.outputs.rwasm));
-
+    // Output results based on format
     if json {
-        let output = Output::Success {
-            data: SuccessData::Compile {
-                contract_name: result.contract.name.clone(),
-                rwasm_hash: format!("0x{}", rwasm_hash),
-                wasm_size: result.outputs.wasm.len(),
-                rwasm_size: result.outputs.rwasm.len(),
-                has_abi: result
-                    .artifacts
-                    .as_ref()
-                    .map(|a| !a.abi.is_empty())
-                    .unwrap_or(false),
-                output_dir: None,
-                git_info: git_info.as_ref().map(GitInfoJson::from),
-                source_type: if use_git_source { "git" } else { "archive" }.to_string(),
-            },
-        };
-        println!("{}", serde_json::to_string(&output)?);
+        output_json_results(&result, &rwasm_hash, &git_info, config.use_git_source)?;
     } else {
-        // Print Git info if available
-        if let Some(git) = &git_info {
-            println!("📦 Git repository: {} @ {}", git.branch, git.commit_hash_short);
-            if git.is_dirty && allow_dirty {
-                println!("⚠️  Warning: Compiling with uncommitted changes (archive source)");
+        output_human_results(&result, &rwasm_hash, &git_info, &config)?;
+    }
+
+    Ok(())
+}
+
+/// Output compilation results as JSON
+fn output_json_results(
+    result: &fluent_builder::CompilationResult,
+    rwasm_hash: &str,
+    git_info: &Option<GitInfo>,
+    use_git_source: bool,
+) -> Result<()> {
+    let output = Output::Success {
+        data: SuccessData::Compile {
+            contract_name: result.contract.name.clone(),
+            rwasm_hash: rwasm_hash.to_string(),
+            wasm_size: result.outputs.wasm.len(),
+            rwasm_size: result.outputs.rwasm.len(),
+            has_abi: result
+                .artifacts
+                .as_ref()
+                .map(|a| !a.abi.is_empty())
+                .unwrap_or(false),
+            output_dir: result.artifacts.as_ref().map(|_| {
+                format!("{}.wasm", result.contract.name)
+            }),
+            git_info: git_info.as_ref().map(GitInfoJson::from),
+            source_type: if use_git_source { "git" } else { "archive" }.to_string(),
+        },
+    };
+    println!("{}", serde_json::to_string(&output)?);
+    Ok(())
+}
+
+/// Output compilation results in human-readable format
+fn output_human_results(
+    result: &fluent_builder::CompilationResult,
+    rwasm_hash: &str,
+    git_info: &Option<GitInfo>,
+    config: &CompileConfig,
+) -> Result<()> {
+    // Show Git repository info if available
+    if let Some(git) = git_info {
+        println!("📦 Git repository: {} @ {}", git.branch, git.commit_hash_short);
+        if git.is_dirty {
+            println!("⚠️  Warning: Compiling with uncommitted changes (archive source)");
+        }
+    }
+
+    println!("✅ Successfully compiled {}", result.contract.name);
+    println!("⏱️  Compilation time: {:.2}s", result.duration.as_secs_f64());
+
+    // If artifacts were generated, save and display them
+    if let Some(artifacts) = &result.artifacts {
+        let saved = save_artifacts(
+            artifacts,
+            &result.contract.name,
+            &result.outputs.wasm,
+            &result.outputs.rwasm,
+            &config.output_directory(),
+            &config.artifacts,
+        )?;
+
+        // Display source type from metadata
+        match &artifacts.metadata.source {
+            fluent_builder::Source::Git { repository, commit, .. } => {
+                println!("\n📦 Source type: Git");
+                println!("   Repository: {}", repository);
+                println!("   Commit: {}", &commit[..8]);
+            }
+            fluent_builder::Source::Archive { .. } => {
+                println!("\n📦 Source type: Archive");
             }
         }
+        
+        // Display output location and files
+        println!("\n📁 Output directory: {}", saved.output_dir.display());
+        println!("📄 Generated files:");
+        println!("   - lib.wasm ({} bytes)", result.outputs.wasm.len());
+        println!("   - lib.rwasm ({} bytes)", result.outputs.rwasm.len());
+        println!("   - rWASM hash: {}", rwasm_hash);
+        
+        // List optional artifacts
+        if saved.abi_path.is_some() {
+            println!("   - abi.json");
+        }
+        if saved.interface_path.is_some() {
+            println!("   - interface.sol");
+        }
+        if saved.metadata_path.is_some() {
+            println!("   - metadata.json");
+        }
 
-        // Save artifacts if any were generated
-        if let Some(artifacts) = &result.artifacts {
-            let saved = save_artifacts(
-                artifacts,
-                &result.contract.name,
-                &result.outputs.wasm,
-                &result.outputs.rwasm,
-                &config.output_directory(),
-                &config.artifacts,
+        // Create source archive if using archive source
+        if !config.use_git_source {
+            let archive_path = saved.output_dir.join("sources.tar.gz");
+            let archive_options = ArchiveOptions::default();
+            
+            create_verification_archive(
+                &config.project_root,
+                &archive_path,
+                &archive_options,
             )?;
-
-            println!("✅ Successfully compiled {}", result.contract.name);
-            
-            // Show source type used
-            if let Some(metadata) = &result.artifacts.as_ref().map(|a| &a.metadata) {
-                match &metadata.source {
-                    fluent_builder::Source::Git { repository, commit, .. } => {
-                        println!("📦 Source: Git repository");
-                        println!("   Repository: {}", repository);
-                        println!("   Commit: {}", &commit[..8]);
-                    }
-                    fluent_builder::Source::Archive { .. } => {
-                        println!("📦 Source: Archive");
-                    }
-                }
-            }
-            
-            println!("📁 Output directory: {}", saved.output_dir.display());
-            println!("📄 Created files:");
-            println!("   - lib.wasm ({} bytes)", result.outputs.wasm.len());
-            println!("   - lib.rwasm ({} bytes)", result.outputs.rwasm.len());
-            println!("   - rWASM hash: 0x{}", rwasm_hash);
-            
-            if saved.abi_path.is_some() {
-                println!("   - abi.json");
-            }
-            if saved.interface_path.is_some() {
-                println!("   - interface.sol");
-            }
-            if saved.metadata_path.is_some() {
-                println!("   - metadata.json");
-            }
-
-            // Create archive if using archive source
-            if !use_git_source {
-                let archive_path = saved.output_dir.join("sources.tar.gz");
-                let archive_options = ArchiveOptions {
-                    format: ArchiveFormat::TarGz,
-                    only_compilation_files: true,
-                    compression_level: 6,
-                    respect_gitignore: true,
-                };
-
-                let _archive_info = create_verification_archive(
-                    &config.project_root,
-                    &archive_path,
-                    &archive_options,
-                )?;
-                println!("   - sources.tar.gz");
-            }
-        } else {
-            println!(
-                "✅ Successfully compiled {} (no artifacts generated)",
-                result.contract.name
-            );
-            println!("   - WASM size: {} bytes", result.outputs.wasm.len());
-            println!("   - rWASM size: {} bytes", result.outputs.rwasm.len());
-            println!("   - rWASM hash: 0x{}", rwasm_hash);
+            println!("   - sources.tar.gz");
         }
+    } else {
+        // Minimal output when artifacts are disabled
+        println!("\n📊 Compilation results:");
+        println!("   - WASM size: {} bytes", result.outputs.wasm.len());
+        println!("   - rWASM size: {} bytes", result.outputs.rwasm.len());
+        println!("   - rWASM hash: {}", rwasm_hash);
+        println!("\n⚠️  No artifacts saved (generation disabled in config)");
     }
 
     Ok(())
@@ -533,6 +635,8 @@ fn output_error(error: eyre::Report) {
         "no_git_repository"
     } else if error.to_string().contains("Compilation failed") {
         "compilation_failed"
+    } else if error.to_string().contains("Docker") {
+        "docker_error"
     } else if error.to_string().contains("Failed to fetch") {
         "network_error"
     } else {
@@ -599,6 +703,24 @@ mod tests {
 
         if let Commands::Compile { allow_dirty, .. } = cli.command {
             assert!(allow_dirty);
+        }
+    }
+
+    #[test]
+    fn test_no_docker_flag() {
+        let cli = Cli::parse_from(&["fluent-builder", "compile", "--no-docker"]);
+
+        if let Commands::Compile { no_docker, .. } = cli.command {
+            assert!(no_docker);
+        }
+    }
+
+    #[test]
+    fn test_docker_clean_command() {
+        let cli = Cli::parse_from(&["fluent-builder", "docker", "clean", "--keep", "3"]);
+
+        if let Commands::Docker { command: DockerCommands::Clean { keep } } = cli.command {
+            assert_eq!(keep, 3);
         }
     }
 }

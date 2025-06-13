@@ -15,7 +15,10 @@ mod verify;
 // Public API - only expose what's necessary
 
 // Core compilation
-pub use builder::{build, get_rwasm_hash, get_wasm_hash, CompilationResult, ContractInfo};
+pub use builder::{
+    build, get_rwasm_hash, get_wasm_hash, read_rust_toolchain_version,
+    read_sdk_version_from_cargo_lock, CompilationResult, ContractInfo,
+};
 pub use config::{ArtifactsConfig, CompileConfig};
 
 // Artifact management
@@ -34,9 +37,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 ///
 /// # Example
 /// ```no_run
-/// use fluent_builder::compile_at;
+/// use fluent_builder::build_at;
 ///
-/// let result = compile_at("./my-contract").unwrap();
+/// let result = build_at("./my-contract").unwrap();
 /// println!("Compiled: {} v{}", result.contract.name, result.contract.version);
 /// ```
 pub fn build_at(project_root: impl Into<std::path::PathBuf>) -> eyre::Result<CompilationResult> {

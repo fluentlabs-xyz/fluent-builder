@@ -189,7 +189,7 @@ fn parse_contract_info(cargo_toml_path: &Path) -> Result<ContractInfo> {
 }
 
 /// Read SDK version from Cargo.lock
-fn read_sdk_version_from_cargo_lock(project_root: &Path) -> Result<String> {
+pub fn read_sdk_version_from_cargo_lock(project_root: &Path) -> Result<String> {
     let cargo_lock_path = project_root.join("Cargo.lock");
 
     if !cargo_lock_path.exists() {
@@ -245,7 +245,7 @@ fn parse_sdk_version(version: &str) -> SdkInfo {
 }
 
 /// Read Rust version from rust-toolchain.toml
-fn read_rust_toolchain_version(project_root: &Path) -> Result<String> {
+pub fn read_rust_toolchain_version(project_root: &Path) -> Result<String> {
     // Try rust-toolchain.toml first
     let toolchain_toml = project_root.join("rust-toolchain.toml");
     if toolchain_toml.exists() {
